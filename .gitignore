@@ -1,0 +1,20 @@
+# --- Python Specific ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/tasks/__pycache__/
+env/graders/__pycache__/
+
+# --- Security & Secrets (CRITICAL) ---
+.env
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
+
+# --- Tools & IDEs ---
+.vscode/
+.idea/
+.docker/

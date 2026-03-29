@@ -1,0 +1,93 @@
+name: kyc-audit-env
+version: "1.0.0"
+description: >
+  KYC compliance audit environment for training and evaluating AI agents on
+  bank fraud detection, AML pattern recognition, and SAR filing.
+  Simulates a real bank compliance desk with synthetic customer profiles,
+  transaction histories, document checks, and fraud network investigations.
+
+author: kyc-audit-env
+tags:
+  - banking
+  - compliance
+  - fraud-detection
+  - aml
+  - kyc
+  - openenv
+
+tasks:
+  - id: task1_doc_check
+    difficulty: easy
+    description: >
+      Document completeness and identity verification. Agent reviews 3 customer
+      profiles with identity documents, occupation, and account details.
+      Must decide: clear, flag for review, or request missing/expired documents.
+    max_steps: 15
+    expected_score_range: [0.55, 0.90]
+
+  - id: task2_txn_analysis
+    difficulty: medium
+    description: >
+      Transaction pattern analysis over 30-day histories. Agent analyzes 5 customers
+      for structuring (smurfing), round-trip transfers, high-velocity activity,
+      and income mismatches. Must flag and file SARs appropriately.
+    max_steps: 25
+    expected_score_range: [0.35, 0.65]
+
+  - id: task3_network_fraud
+    difficulty: hard
+    description: >
+      Multi-entity fraud network investigation. Agent investigates 10 customers
+      with hidden relationships via shell companies, shared addresses, and chain
+      transfers (layering). Must map the network, file SARs for critical cases,
+      and freeze accounts at risk. Requires multi-hop reasoning.
+    max_steps: 40
+    expected_score_range: [0.15, 0.40]
+
+observation_space:
+  type: structured
+  fields:
+    - task_id: string
+    - episode_id: string
+    - step: integer
+    - max_steps: integer
+    - customers: list[CustomerProfile]
+    - available_actions: list[string]
+    - completed_actions: list[Action]
+    - task_description: string
+    - message: string
+
+action_space:
+  type: structured
+  actions:
+    - clear_customer: "KYC passed, no issues"
+    - flag_for_review: "Escalate to senior analyst"
+    - request_documents: "Request missing or expired documents"
+    - file_sar: "File Suspicious Activity Report"
+    - freeze_account: "Block account transactions"
+    - link_entities: "Assert relationship between two customers"
+    - add_note: "Add analyst note without final decision"
+
+reward:
+  range: [0.0, 1.0]
+  type: dense
+  components:
+    - correct_decision: 0.35-0.45
+    - risk_tier_accuracy: 0.15-0.20
+    - evidence_quality: 0.20-0.30
+    - entity_linking: 0.0-0.20
+    - document_handling: 0.0-0.10
+    - procedural_compliance: variable
+    - penalties: variable (false positives, procedural errors, inactivity)
+
+api:
+  reset: "POST /reset"
+  step: "POST /step"
+  state: "GET /state"
+  grade: "GET /grade"
+  tasks: "GET /tasks"
+  health: "GET /health"
+
+runtime:
+  port: 7860
+  framework: fastapi
