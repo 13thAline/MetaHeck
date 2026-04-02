@@ -1,20 +1,28 @@
-# --- Python Specific ---
+# Environments
+.env
+.env.*
+.venv/
+env/
+venv/
+
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-venv/
-.venv/
-env/tasks/__pycache__/
-env/graders/__pycache__/
 
-# --- Security & Secrets (CRITICAL) ---
-.env
+# Pytest / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
 
-# --- OS Specific ---
+# OpenEnv & build artifacts
+*.egg-info/
+build/
+dist/
+
+# Logs
+*.log
+
+# OS generated files
 .DS_Store
 Thumbs.db
-
-# --- Tools & IDEs ---
-.vscode/
-.idea/
-.docker/

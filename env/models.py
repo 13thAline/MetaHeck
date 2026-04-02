@@ -1,111 +1,70 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
-from datetime import date
 from enum import Enum
-
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
+from openenv.core import Action as BaseAction, Observation as BaseObservation, State as BaseState
 
 class ActionType(str, Enum):
-    CLEAR_CUSTOMER = "clear_customer"
-    FLAG_FOR_REVIEW = "flag_for_review"
-    REQUEST_DOCUMENTS = "request_documents"
-    FILE_SAR = "file_sar"
+    REQUEST_ADDITIONAL_DOCUMENTS = "request_additional_documents"
+    VERIFY_DOCUMENT_AUTHENTICITY = "verify_document_authenticity"
+    ANALYZE_TRANSACTION_PATTERNS = "analyze_transaction_patterns"
+    CHECK_WATCHLISTS = "check_watchlists"
+    INTERVIEW_CUSTOMER = "interview_customer"
+    PERFORM_RISK_SCORING = "perform_risk_scoring"
+    APPROVE = "approve"
+    REJECT = "reject"
+    ESCALATE = "escalate"
     FREEZE_ACCOUNT = "freeze_account"
-    LINK_ENTITIES = "link_entities"
-    ADD_NOTE = "add_note"
-
-
-class RiskTier(str, Enum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
-
-
-class TransactionType(str, Enum):
-    CASH_DEPOSIT = "cash_deposit"
-    CASH_WITHDRAWAL = "cash_withdrawal"
-    WIRE_TRANSFER = "wire_transfer"
-    INTERNAL = "internal"
-    ATM = "atm"
-
-
-class Transaction(BaseModel):
-    txn_id: str
-    date: str  # ISO format string for JSON serialization
-    amount_usd: float
-    type: TransactionType
-    counterparty: Optional[str] = None
-    country: Optional[str] = None
-    description: Optional[str] = None
-
 
 class CustomerProfile(BaseModel):
     customer_id: str
-    name: str
-    dob: str  # ISO format string
-    nationality: str
-    occupation: str
-    annual_income_usd: float
-    account_open_date: str  # ISO format string
-    documents_present: List[str] = Field(default_factory=list)
-    documents_expired: List[str] = Field(default_factory=list)
-    documents_missing: List[str] = Field(default_factory=list)
-    transactions: List[Transaction] = Field(default_factory=list)
-    linked_entity_ids: List[str] = Field(default_factory=list)
-    address: str = ""
-    phone: str = ""
-    pep_flag: bool = False          # Politically Exposed Person
-    sanctions_flag: bool = False
-    adverse_media: List[str] = Field(default_factory=list)
-
-
-class Observation(BaseModel):
-    task_id: str
-    episode_id: str
-    step: int
-    max_steps: int
-    customers: List[CustomerProfile]
-    available_actions: List[str]
-    completed_actions: List[Dict[str, Any]] = Field(default_factory=list)
-    message: Optional[str] = None
-    task_description: str = ""
-
-
-class Action(BaseModel):
-    action_type: ActionType
-    customer_id: str
-    target_customer_id: Optional[str] = None   # for link_entities
-    documents_requested: Optional[List[str]] = None
-    reason: str = Field(..., min_length=10)     # agent must explain reasoning
-    risk_tier: Optional[RiskTier] = None
-    sar_details: Optional[Dict[str, Any]] = None  # for file_sar
-
+    personal_info: Dict[str, Any]
+    documents: List[Dict[str, Any]]
+    transaction_history: List[Dict[str, Any]]
+    device_signals: Dict[str, Any]
+    behavioral_signals: Dict[str, Any]
+    interview_log: List[str] = Field(default_factory=list)
+    watchlist_report: Optional[str] = None
+    red_flags: List[str] = Field(default_factory=list)
 
 class RewardBreakdown(BaseModel):
-    correct_decision: float = 0.0
-    risk_tier_accuracy: float = 0.0
-    evidence_quality: float = 0.0
-    entity_linking: float = 0.0
-    document_handling: float = 0.0
-    procedural_compliance: float = 0.0
+    correct_sequencing: float = 0.0
+    efficient_investigation: float = 0.0
+    accurate_flag_detection: float = 0.0
+    professional_interviewing: float = 0.0
+    correct_final_decision: float = 0.0
     penalty: float = 0.0
+    total: float = 0.0
+    reasoning: str = ""
 
-
-class Reward(BaseModel):
-    step_score: float = Field(ge=0.0, le=1.0)
-    cumulative_score: float = Field(ge=0.0, le=1.0)
-    breakdown: RewardBreakdown
-    feedback: str
-    done: bool = False
-
-
-class EnvironmentState(BaseModel):
+class Observation(BaseObservation):
     task_id: str
     episode_id: str
     step: int
     max_steps: int
-    customers: List[CustomerProfile]
-    actions_taken: List[Dict[str, Any]]
-    ground_truth: Dict[str, Any]
-    cumulative_score: float
-    done: bool
+    customer: CustomerProfile
+    available_actions: List[str]
+    completed_actions: List[Dict[str, Any]] = Field(default_factory=list)
+    task_description: str
+    message: str = ""
+    # Inherited fields: done: bool, reward: float | None, metadata: Dict[str, Any]
+
+class Action(BaseAction):
+    action_type: ActionType
+    target_customer_id: str
+    interview_question: Optional[str] = None
+    question: Optional[str] = None
+    requested_document_type: Optional[str] = None
+    risk_score_assigned: Optional[int] = None
+    decision_reasoning: Optional[str] = None
+
+class EnvironmentState(BaseState):
+    task_id: str
+    episode_id: str
+    step: int
+    max_steps: int
+    customer: CustomerProfile
+    actions_taken: List[Dict[str, Any]] = Field(default_factory=list)
+    cumulative_score: float = 0.0
+    done: bool = False
+    reward_breakdown: Optional[RewardBreakdown] = None
+    investigation_flags_found: List[str] = Field(default_factory=list)

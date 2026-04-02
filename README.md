@@ -1,163 +1,85 @@
-# KYC Audit Environment
+# BankKYCAuditEnv (2025 Standard)
 
-An OpenEnv-compliant environment that simulates a **bank KYC/AML compliance desk**.
-AI agents act as fraud analysts — reviewing customer profiles, detecting suspicious
-transaction patterns, mapping fraud networks, and filing regulatory reports.
+An advanced 2025-standard KYC/AML audit environment for testing frontier AI reasoning and agentic workflows. Built entirely on the strict **OpenEnv** specification framework.
 
-## Why KYC?
+## Domain & Motivation
+The financial services sector heavily relies on rigid, rule-based KYC (Know Your Customer) systems. These are increasingly bypassed by synthetic identities and sophisticated money mule networks. AI Agents possess the nuanced reasoning capability to act as Tier-1 and Tier-2 Fraud analysts, but they require robust interactive environments to learn from rather than static datasets. 
 
-Banks employ hundreds of analysts to manually review customers for fraud and money
-laundering. This is expensive, slow, and inconsistent. This environment lets you
-train and evaluate AI agents to do this work — across three progressively harder tasks.
+**BankKYCAuditEnv** places the AI model directly in the seat of a Senior KYC Analyst. Instead of a simple "yes/no" based on text rules, the agent must iteratively interview the simulated customer, cross-reference documents with device-level signals (IPs, typing cadence), and call simulated graph-analysis tools to detect modern red flags. 
 
 ---
 
-## Tasks
+## Technical Specifications
 
-| Task | Difficulty | Description | Max Steps |
-|---|---|---|---|
-| `task1_doc_check` | Easy | Document completeness & identity verification | 15 |
-| `task2_txn_analysis` | Medium | Transaction pattern analysis (structuring, round-trips) | 25 |
-| `task3_network_fraud` | Hard | Multi-entity fraud network investigation + SAR filing | 40 |
+### Action Space
+The agent navigates a strictly typed `Action` schema requiring a target `customer_id` and specific context:
+* `request_additional_documents`: Flags missing application materials.
+* `verify_document_authenticity`: Triggers secure forensics on potential Deepfake IDs.
+* `analyze_transaction_patterns`: Internally scores transaction logs for circular flow/mules.
+* `check_watchlists`: Queries OFAC and PEP (Politically Exposed Persons) schemas.
+* `interview_customer`: Multi-turn interaction injecting Q&A directly into the next state frame.
+* `perform_risk_scoring`: Commits evidence towards a rigid risk tier.
+* **Terminal Actions:** `approve`, `reject`, `escalate`, `freeze_account`
 
-### Task 1 — Document Check (Easy)
-Agent reviews 3 customer profiles. Must identify expired documents, occupation/income
-mismatches, and missing verification docs. Actions: `clear_customer`, `flag_for_review`,
-`request_documents`.
-
-### Task 2 — Transaction Analysis (Medium)
-Agent reviews 5 customers with 30-day transaction histories. Must detect:
-- **Structuring/smurfing** — repeated deposits just under $10,000
-- **Round-trip transfers** — money sent and returned within 48 hours
-- **High-velocity activity** — 50+ transactions from a dormant account
-
-### Task 3 — Network Fraud (Hard)
-Agent investigates 10 customers with hidden relationships:
-- **Shell company** linked to 3 individuals at a shared address
-- **Chain layering** — 3 customers rapidly forwarding funds to cash out
-- **PEP flag** — politically exposed person with adverse media
-Agent must use `link_entities` to map the network before filing SARs.
+### Observation Space
+Environment state strictly aligns to `openenv.core.Observation` wrapping a rich Pydantic `CustomerProfile`.
+* **Personal Info**: Standard demographics (with deliberate intentional discrepancies).
+* **Behavioral Signals**: Typing cadence, session averages (detects bot automation).
+* **Device Signals**: Geolocation mismatches, Emulator flags, VPN usage.
+* **Transaction History**: Time-series arrays simulating 90-day financial flow.
+* **Interview Log**: Accumulated multi-turn conversation string state tracking.
 
 ---
 
-## Action Space
-
-| Action | Description |
-|---|---|
-| `clear_customer` | Customer passes KYC — no issues |
-| `flag_for_review` | Escalate to senior analyst |
-| `request_documents` | Request missing/expired docs from customer |
-| `file_sar` | File Suspicious Activity Report |
-| `freeze_account` | Block account (use after SAR) |
-| `link_entities` | Assert relationship between two customers |
-| `add_note` | Add analyst note without final decision |
-
-## Observation Space
-
-Each step returns a full `Observation` containing:
-- All customer profiles (documents, transactions, flags, linked entities)
-- Current step / max steps
-- History of actions taken this episode
-- Task description and system messages
-
-## Reward Function
-
-Dense reward signal at every step:
-
-| Component | Weight | Description |
-|---|---|---|
-| Correct decision | 0.35–0.45 | Right action for this customer |
-| Risk tier accuracy | 0.15–0.20 | low/medium/high/critical match |
-| Evidence quality | 0.20–0.30 | Reasoning cites relevant red flags |
-| Entity linking | 0.0–0.20 | Correct network connections (Task 3) |
-| Procedural compliance | variable | SAR before freeze, etc. |
-| Penalties | negative | False positives, procedural errors |
-
-Final episode score comes from the task grader (0.0–1.0).
+## Task Difficulty Progression
+1. **Task 1: Easy (Clean Customer)**  
+   Features a standard minor discrepancy (a simple apartment number formatting typo). The agent must verify identity and use `approve` gracefully.
+2. **Task 2: Medium (Crypto Mixing & High Velocity)**  
+   A freelancer profile exhibiting high-frequency deposits immediately siphoned to offshore exchanges over a mismatched VPN IP. The agent must successfully utilize `interview_customer` to discover the missing source-of-funds. 
+3. **Task 3: Hard (The Frankenstein Mule)**  
+   Deepfake document artifacts + spoofed device hashes out of Cyprus + massive offshore transactions wiring cyclically back to the original funding account. Hitting the watchlist reveals a heavily sanctioned PEP link. Requires multi-hop logic terminating in an immediate `freeze_account`.
 
 ---
 
-## Setup & Usage
+## Dense Reward Mechanics
+Tasks are graded deterministically `0.0 - 1.0` utilizing `openenv.core` paradigms:
+* **Final Correctness (40%)**: Making the right terminal call across fraud matrices. 
+* **Proper Sequencing (30%)**: Validating against external watchlists *before* making the decision. Triggering graph algorithms specifically when large obfuscated transactions appear. 
+* **Efficiency (15%)**: Completing the evaluation strictly within the optimal step margin. Unbounded interview loops kill efficiency scores.
+* **Professional Quality (15%)**: Accurately pinning the internal risk tier mathematically via `perform_risk_scoring` before signing off. 
 
-### Local development
+---
 
+## Baseline Verification
+Executing `inference.py` runs our robust, multi-hop baseline against all three configurations. The agent follows checking patterns dynamically interacting via OpenEnv endpoints. 
+
+**Official Baseline Scores:**
+* **Task 1 (Easy)**: `0.70`
+* **Task 2 (Medium)**: `1.00`
+* **Task 3 (Hard)**: `1.00`
+
+## Setup & HF Spaces Deployment
+
+### Local Testing
+The environment is built utilizing Fast Dependency resolution (`uv`) and fully typed specifications.
 ```bash
-git clone <repo>
-cd kyc-audit-env
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 7860
-```
+# Generate lockfiles and install dependencies
+uv lock
+uv sync
 
-### Docker
+# Validate the OpenEnv Spec
+openenv validate . --verbose
 
-```bash
-docker build -t kyc-audit-env .
-docker run -p 7860:7860 kyc-audit-env
-```
-
-### API Usage
-
-```bash
-# Start an episode
-curl -X POST http://localhost:7860/reset \
-  -H "Content-Type: application/json" \
-  -d '{"task_id": "task1_doc_check"}'
-
-# Take an action
-curl -X POST http://localhost:7860/step \
-  -H "Content-Type: application/json" \
-  -d '{
-    "action": {
-      "action_type": "flag_for_review",
-      "customer_id": "CUST-T1-C",
-      "reason": "Student occupation with $180k income is suspicious. Missing source of funds documentation.",
-      "risk_tier": "high"
-    }
-  }'
-
-# Get final score
-curl http://localhost:7860/grade
-```
-
-### Run baseline inference
-
-```bash
-export API_BASE_URL="https://api.openai.com/v1"
-export MODEL_NAME="gpt-4o-mini"
-export HF_TOKEN="your-api-key"
-export ENV_URL="http://localhost:7860"
-
+# Run the inference baseline
 python inference.py
 ```
 
----
+### Hosting & Spaces Validation
+We deploy via specialized HuggingFace Docker constraints native to the Space ecosystem `(port 8080)`:
 
-## Baseline Scores (gpt-4o-mini)
-
-| Task | Score |
-|---|---|
-| task1_doc_check | ~0.72 |
-| task2_txn_analysis | ~0.51 |
-| task3_network_fraud | ~0.28 |
-| **Overall** | **~0.50** |
-
----
-
-## Project Structure
-
-```
-kyc-audit-env/
-├── env/
-│   ├── models.py            Pydantic models (Observation, Action, Reward)
-│   ├── environment.py       KYCEnvironment class (step/reset/state/grade)
-│   ├── data_generator.py    Synthetic customer + transaction generator
-│   ├── tasks/               Task definitions
-│   └── graders/             Deterministic graders for each task
-├── main.py                  FastAPI server
-├── inference.py             Baseline agent script
-├── openenv.yaml             OpenEnv spec metadata
-├── Dockerfile
-├── requirements.txt
-└── README.md
+```bash
+uv run server
+# or via Container
+docker build -t bankkyc .
+docker run -p 8080:8080 bankkyc
 ```

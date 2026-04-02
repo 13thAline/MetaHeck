@@ -1,278 +1,166 @@
-"""
-KYC Audit Environment — OpenEnv compliant implementation.
-Simulates a bank KYC/AML compliance desk.
-"""
 import uuid
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Optional, Tuple
+
+from openenv.core import Environment
 from env.models import (
-    Action, Observation, Reward, RewardBreakdown, EnvironmentState,
-    ActionType
+    Action, Observation, RewardBreakdown, EnvironmentState,
+    ActionType, CustomerProfile
 )
-from env.data_generator import (
-    generate_task1_profiles,
-    generate_task2_profiles,
-    generate_task3_profiles,
-)
-from env.graders import grader1, grader2, grader3
+from env.data_generator import get_customer_for_task
+from env.graders import grade_episode
 
-
+# Task Config
 TASK_CONFIG = {
-    "task1_doc_check": {
-        "description": (
-            "You are a KYC analyst. Review each customer's identity documents, "
-            "occupation, and account details. Decide: clear, flag, or request more docs. "
-            "Always provide a reason explaining your decision."
-        ),
-        "max_steps": 15,
-        "generator": generate_task1_profiles,
-        "grader": grader1,
-    },
-    "task2_txn_analysis": {
-        "description": (
-            "You are an AML analyst. Analyze 30-day transaction histories for each customer. "
-            "Identify structuring, round-trips, high-velocity, and income mismatches. "
-            "Flag suspicious customers and file SARs where required."
-        ),
-        "max_steps": 25,
-        "generator": generate_task2_profiles,
-        "grader": grader2,
-    },
-    "task3_network_fraud": {
-        "description": (
-            "You are a senior fraud investigator. Ten customers may be connected through "
-            "shell companies, shared addresses, and chain transfers. "
-            "Use link_entities to map the network, file SARs for critical cases, "
-            "and freeze accounts where funds are at risk."
-        ),
-        "max_steps": 40,
-        "generator": generate_task3_profiles,
-        "grader": grader3,
-    },
+    "task1_easy": {"max_steps": 10, "description": "Easy: Clean customer, address mismatch."},
+    "task2_medium": {"max_steps": 15, "description": "Medium: Suspicious txns, source of funds needed."},
+    "task3_hard": {"max_steps": 25, "description": "Hard: Synthetic ID, mule network, deepfakes."},
 }
 
-AVAILABLE_ACTIONS = [
-    "clear_customer", "flag_for_review", "request_documents",
-    "file_sar", "freeze_account", "link_entities", "add_note",
-]
+class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
+    """OpenEnv-compliant 2025 Bank KYC Audit environment passing dense multi-step reward logic."""
 
+    SUPPORTS_CONCURRENT_SESSIONS = True
 
-class KYCEnvironment:
-    """OpenEnv-compliant KYC Audit environment."""
-
-    def __init__(self, task_id: str = "task1_doc_check"):
+    def __init__(self, task_id: str = "task1_easy"):
         if task_id not in TASK_CONFIG:
-            raise ValueError(f"Unknown task_id '{task_id}'. Choose from {list(TASK_CONFIG)}")
+            raise ValueError(f"Unknown task_id '{task_id}'.")
         self.task_id = task_id
         self._state: Optional[EnvironmentState] = None
+        super().__init__()
 
-    # ── Core OpenEnv API ───────────────────────────────────────────────────
-
-    def reset(self) -> Observation:
-        """Start a new episode. Returns initial observation."""
+    def reset(self, seed: Optional[int] = None, episode_id: Optional[str] = None, **kwargs: Any) -> Observation:
         config = TASK_CONFIG[self.task_id]
-        customers, ground_truth = config["generator"]()
-
+        customer = get_customer_for_task(self.task_id)
+        
         self._state = EnvironmentState(
             task_id=self.task_id,
-            episode_id=str(uuid.uuid4()),
+            episode_id=episode_id or str(uuid.uuid4()),
             step=0,
             max_steps=config["max_steps"],
-            customers=customers,
+            customer=customer,
             actions_taken=[],
-            ground_truth=ground_truth,
             cumulative_score=0.0,
             done=False,
+            reward_breakdown=RewardBreakdown(),
+            investigation_flags_found=[]
         )
+        return self._build_observation("New case loaded. Waiting for investigator action.")
 
-        return self._build_observation()
-
-    def step(self, action: Action) -> Tuple[Observation, Reward, bool, Dict[str, Any]]:
-        """
-        Apply an action. Returns (observation, reward, done, info).
-        """
-        if self._state is None:
+    def step(self, action: Action, timeout_s: Optional[float] = None, **kwargs: Any) -> Observation:
+        if self._state is None or self._state.done:
             raise RuntimeError("Call reset() before step().")
-        if self._state.done:
-            raise RuntimeError("Episode is done. Call reset() to start a new one.")
 
         self._state.step += 1
-
-        # Validate action customer exists
-        cust_ids = {c.customer_id for c in self._state.customers}
-        if action.customer_id not in cust_ids:
-            reward = Reward(
-                step_score=0.0,
-                cumulative_score=self._state.cumulative_score,
-                breakdown=RewardBreakdown(penalty=-0.05),
-                feedback=f"Invalid customer_id '{action.customer_id}'.",
-                done=False,
-            )
-            return self._build_observation(), reward, False, {}
-
-        # Record the action
         self._state.actions_taken.append(action.model_dump())
+        
+        breakdown = RewardBreakdown()
+        message = ""
+        done = False
 
-        # Compute step reward
-        step_score, breakdown, feedback = self._compute_step_reward(action)
-
-        # Update cumulative score (running average)
-        n = self._state.step
-        self._state.cumulative_score = (
-            (self._state.cumulative_score * (n - 1) + step_score) / n
-        )
-
-        # Check done conditions
-        done = self._check_done()
-        self._state.done = done
-
-        reward = Reward(
-            step_score=round(step_score, 4),
-            cumulative_score=round(self._state.cumulative_score, 4),
-            breakdown=breakdown,
-            feedback=feedback,
-            done=done,
-        )
-
-        return self._build_observation(), reward, done, {"episode_id": self._state.episode_id}
-
-    def state(self) -> EnvironmentState:
-        """Return full internal state (for debugging/logging)."""
-        if self._state is None:
-            raise RuntimeError("Call reset() first.")
-        return self._state
-
-    # ── Final episode grading ──────────────────────────────────────────────
-
-    def grade_episode(self) -> Dict[str, Any]:
-        """
-        Run the task grader over all actions taken this episode.
-        Returns final score + detailed breakdown.
-        """
-        if self._state is None:
-            return {"score": 0.0, "feedback": "No episode started."}
-
-        grader = TASK_CONFIG[self.task_id]["grader"]
-        result = grader.grade(self._state.actions_taken, self._state.ground_truth)
-        return result
-
-    # ── Internal helpers ───────────────────────────────────────────────────
-
-    def _build_observation(self) -> Observation:
-        s = self._state
-        return Observation(
-            task_id=s.task_id,
-            episode_id=s.episode_id,
-            step=s.step,
-            max_steps=s.max_steps,
-            customers=s.customers,
-            available_actions=AVAILABLE_ACTIONS,
-            completed_actions=s.actions_taken,
-            task_description=TASK_CONFIG[s.task_id]["description"],
-            message=self._step_message(),
-        )
-
-    def _step_message(self) -> str:
-        s = self._state
-        remaining = s.max_steps - s.step
-        acted = {a["customer_id"] for a in s.actions_taken
-                 if a.get("action_type") != "link_entities"}
-        total = len(s.customers)
-        reviewed = len(acted)
-        return (
-            f"Step {s.step}/{s.max_steps}. "
-            f"Customers reviewed: {reviewed}/{total}. "
-            f"Steps remaining: {remaining}."
-        )
-
-    def _compute_step_reward(self, action: Action) -> Tuple[float, RewardBreakdown, str]:
-        """
-        Lightweight step-level reward for immediate feedback.
-        Full episode scoring is done by grade_episode().
-        """
-        bd = RewardBreakdown()
-        feedback_parts = []
-
-        cid = action.customer_id
-        gt = self._state.ground_truth.get(cid, {})
-        action_type = action.action_type.value
-
-        # Correct decision signal
-        if gt and action_type == gt.get("decision"):
-            bd.correct_decision = 0.5
-            feedback_parts.append("Correct decision.")
-        elif gt and action_type in ["flag_for_review", "file_sar"] \
-                and gt.get("decision") in ["flag_for_review", "file_sar", "freeze_account"]:
-            bd.correct_decision = 0.25
-            feedback_parts.append("Partially correct — suspicious customer detected.")
-        elif gt and gt.get("decision") == "clear_customer" \
-                and action_type in ["flag_for_review", "file_sar", "freeze_account"]:
-            bd.penalty = -0.3
-            feedback_parts.append("False positive — this customer is clean.")
-        elif gt:
-            feedback_parts.append(f"Incorrect decision. Expected: {gt.get('decision')}.")
-
-        # Risk tier signal
-        if action.risk_tier and gt:
-            if action.risk_tier.value == gt.get("risk_tier"):
-                bd.risk_tier_accuracy = 0.2
+        # --- DENSE REWARD LOGIC ---
+        a_type = action.action_type
+        
+        if a_type in [ActionType.REQUEST_ADDITIONAL_DOCUMENTS, ActionType.VERIFY_DOCUMENT_AUTHENTICITY]:
+            message = "Documents verified via secure enclave. ID confirmed."
+            breakdown.correct_sequencing += 0.05
+            
+        elif a_type == ActionType.ANALYZE_TRANSACTION_PATTERNS:
+            message = "Transaction graph analyzed. Detected 2 circular loops in history."
+            breakdown.accurate_flag_detection += 0.10
+            self._state.investigation_flags_found.append("circular_txns")
+            
+        elif a_type == ActionType.CHECK_WATCHLISTS:
+            message = "Checked OFAC/PEP lists. No direct hits."
+            breakdown.correct_sequencing += 0.05
+            
+        elif a_type == ActionType.INTERVIEW_CUSTOMER:
+            q = getattr(action, "question", None) or getattr(action, "interview_question", None) or ""
+            message = f"Customer replied: 'I received those funds from my uncle regarding the {q}'"
+            self._state.customer.interview_log.append(f"Q: {q} | A: {message}")
+            breakdown.professional_interviewing += 0.10
+            
+        elif a_type == ActionType.PERFORM_RISK_SCORING:
+            if not self._state.investigation_flags_found:
+                breakdown.penalty -= 0.10
+                message = "Risk score performed without gathering evidence. Penalty applied."
             else:
-                feedback_parts.append(f"Risk tier mismatch. Expected: {gt.get('risk_tier')}.")
+                breakdown.correct_sequencing += 0.10
+                message = "Risk safely calculated based on current indicators."
+                
+        elif a_type in [ActionType.APPROVE, ActionType.REJECT, ActionType.ESCALATE, ActionType.FREEZE_ACCOUNT]:
+            done = True
+            # Simplified final reward logic until Phase 3 integrated Graders
+            if a_type == ActionType.APPROVE and self.task_id == "task1_easy":
+                breakdown.correct_final_decision += 0.30
+                message = "Correct Final Decision: Approved clean customer."
+            elif a_type in [ActionType.ESCALATE, ActionType.FREEZE_ACCOUNT] and self.task_id == "task3_hard":
+                breakdown.correct_final_decision += 0.40
+                message = "Correct Final Decision: Synthetic ID halted."
+            else:
+                breakdown.penalty -= 0.50
+                message = "Incorrect Final Decision. Protocol breach."
+            
+            # Efficient investigation logic
+            if self._state.step < self._state.max_steps * 0.7:
+                breakdown.efficient_investigation += 0.10
 
-        # Reward for providing reasoning
-        if action.reason and len(action.reason) > 20:
-            bd.evidence_quality = 0.1
-        else:
-            bd.penalty += -0.05
-            feedback_parts.append("Provide more detailed reasoning.")
+        # Terminate if max steps exceeded
+        if self._state.step >= self._state.max_steps and not done:
+            done = True
+            message = "Max steps reached without decision."
+            breakdown.penalty -= 0.20
 
-        # Entity linking signal
-        if action.action_type == ActionType.LINK_ENTITIES:
-            gt_links = self._state.ground_truth.get(cid, {}).get("network_links", [])
-            if action.target_customer_id in gt_links:
-                bd.entity_linking = 0.3
-                feedback_parts.append("Correct entity link identified.")
-            elif action.target_customer_id:
-                bd.penalty += -0.1
-                feedback_parts.append("Incorrect entity link.")
+        # Compute total
+        step_total = sum([
+            breakdown.correct_sequencing,
+            breakdown.efficient_investigation,
+            breakdown.accurate_flag_detection,
+            breakdown.professional_interviewing,
+            breakdown.correct_final_decision,
+            breakdown.penalty
+        ])
+        
+        self._state.cumulative_score += step_total
+        self._state.done = done
+        self._state.reward_breakdown = breakdown
 
-        # Procedural: freeze without SAR first
-        if action.action_type == ActionType.FREEZE_ACCOUNT:
-            prior_sars = [a for a in self._state.actions_taken
-                          if a.get("action_type") == "file_sar"
-                          and a.get("customer_id") == cid]
-            if not prior_sars:
-                bd.procedural_compliance = -0.2
-                feedback_parts.append("Procedural: file SAR before freezing account.")
-
-        # Step penalty for going over 80% of max steps without finishing
-        progress = self._state.step / self._state.max_steps
-        if progress > 0.8:
-            reviewed = {a["customer_id"] for a in self._state.actions_taken
-                        if a.get("action_type") != "link_entities"}
-            total = len(self._state.customers)
-            if len(reviewed) < total * 0.8:
-                bd.penalty += -0.05
-                feedback_parts.append("Warning: running out of steps.")
-
-        step_score = max(0.0, min(1.0,
-            bd.correct_decision + bd.risk_tier_accuracy + bd.evidence_quality +
-            bd.entity_linking + bd.document_handling + bd.procedural_compliance + bd.penalty
-        ))
-
-        return step_score, bd, " | ".join(feedback_parts) or "Action recorded."
-
-    def _check_done(self) -> bool:
-        s = self._state
-        # Done if max steps reached
-        if s.step >= s.max_steps:
-            return True
-        # Done if all customers have a final decision
-        final_decisions = {
-            "clear_customer", "file_sar", "freeze_account", "flag_for_review"
+        obs = self._build_observation(message)
+        obs.reward = round(step_total, 4)
+        obs.done = done
+        obs.metadata = {
+            "cumulative_score": round(self._state.cumulative_score, 4),
+            "breakdown": breakdown.model_dump(),
+            "flags": self._state.investigation_flags_found
         }
-        acted_final = {
-            a["customer_id"] for a in s.actions_taken
-            if a.get("action_type") in final_decisions
-        }
-        all_customers = {c.customer_id for c in s.customers}
-        return acted_final >= all_customers
+        return obs
+
+    def _build_observation(self, message: str) -> Observation:
+        config = TASK_CONFIG[self.task_id]
+        
+        # Enumerate actions dynamically for UI rendering
+        avail = [a.value for a in ActionType]
+
+        return Observation(
+            task_id=self.task_id,
+            episode_id=self._state.episode_id,
+            step=self._state.step,
+            max_steps=self._state.max_steps,
+            customer=self._state.customer,
+            available_actions=avail,
+            completed_actions=self._state.actions_taken,
+            task_description=config["description"],
+            message=message,
+            done=self._state.done,
+            reward=0.0,
+            metadata={}
+        )
+
+    @property
+    def state(self) -> EnvironmentState:
+        if self._state is None:
+            raise RuntimeError("Environment not initialized.")
+        return self._state
+        
+    def grade(self) -> float:
+        """Call the deterministic grader"""
+        return grade_episode(self._state)
