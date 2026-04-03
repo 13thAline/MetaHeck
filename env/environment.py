@@ -1,23 +1,38 @@
 import uuid
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, List
 
 from openenv.core import Environment
 from env.models import (
     Action, Observation, RewardBreakdown, EnvironmentState,
     ActionType, CustomerProfile
 )
-from env.data_generator import get_customer_for_task
-from env.graders import grade_episode
 
-# Task Config
 TASK_CONFIG = {
-    "task1_easy": {"max_steps": 10, "description": "Easy: Clean customer, address mismatch."},
-    "task2_medium": {"max_steps": 15, "description": "Medium: Suspicious txns, source of funds needed."},
-    "task3_hard": {"max_steps": 25, "description": "Hard: Synthetic ID, mule network, deepfakes."},
+    "task1_easy": {"max_steps": 15, "description": "Easy: Process the compliance queue. Verify docs, check mismatches."},
+    "task2_medium": {"max_steps": 20, "description": "Medium: Suspicious txns. Query the ledger, check source of funds."},
+    "task3_hard": {"max_steps": 30, "description": "Hard: Multi-customer mule network. Find the overlapping IP addresses and circular chains."},
+}
+
+MOCK_DATABASE = {
+    "CUST-001": {
+        "docs": "ID: Valid Driver's License. Utility Bill: Mismatch (Address is P.O. Box).",
+        "txns": [{"date": "2025-01-10", "amount": 9500, "type": "deposit", "id": "TXN-A1"}],
+        "watchlists": "CLEAR",
+        "device": "IP: 192.168.1.5 (Local)"
+    },
+    "CUST-002": {
+        "docs": "ID: Passport (Expired).",
+        "txns": [
+            {"date": "2025-02-01", "amount": 9900, "type": "deposit", "id": "TXN-M1"},
+            {"date": "2025-02-02", "amount": 9900, "type": "deposit", "id": "TXN-M2"}
+        ],
+        "watchlists": "PEP HIT (Uncle is Minister of Finance)",
+        "device": "IP: 45.33.22.1 (VPN Detected)"
+    }
 }
 
 class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
-    """OpenEnv-compliant 2025 Bank KYC Audit environment passing dense multi-step reward logic."""
+    """OpenEnv-compliant 2025 Bank KYC Audit Sandbox."""
 
     SUPPORTS_CONCURRENT_SESSIONS = True
 
@@ -30,21 +45,26 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
 
     def reset(self, seed: Optional[int] = None, episode_id: Optional[str] = None, **kwargs: Any) -> Observation:
         config = TASK_CONFIG[self.task_id]
-        customer = get_customer_for_task(self.task_id)
+        
+        queue = [
+            CustomerProfile(customer_id="CUST-001", status="pending_review", personal_info={"name": "Alice Smith", "opened": "2025-01-01"}),
+            CustomerProfile(customer_id="CUST-002", status="pending_review", personal_info={"name": "Bob Jones", "opened": "2025-02-01"})
+        ]
         
         self._state = EnvironmentState(
             task_id=self.task_id,
             episode_id=episode_id or str(uuid.uuid4()),
             step=0,
             max_steps=config["max_steps"],
-            customer=customer,
+            customers=queue,
             actions_taken=[],
             cumulative_score=0.0,
             done=False,
-            reward_breakdown=RewardBreakdown(),
-            investigation_flags_found=[]
+            reward_breakdown=RewardBreakdown()
         )
-        return self._build_observation("New case loaded. Waiting for investigator action.")
+        self._investigation_tracker = {"CUST-001": set(), "CUST-002": set()}
+        
+        return self._build_observation(message="System initialized. Compliance Queue loaded.", context="")
 
     def step(self, action: Action, timeout_s: Optional[float] = None, **kwargs: Any) -> Observation:
         if self._state is None or self._state.done:
@@ -55,89 +75,78 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
         
         breakdown = RewardBreakdown()
         message = ""
-        done = False
+        context = ""
+        cid = action.target_customer_id
 
-        # --- DENSE REWARD LOGIC ---
+        if cid not in MOCK_DATABASE:
+            breakdown.penalty -= 0.1
+            return self._build_observation(f"Error: Customer {cid} not found in system.", "")
+
+        db_record = MOCK_DATABASE[cid]
         a_type = action.action_type
-        
-        if a_type in [ActionType.REQUEST_ADDITIONAL_DOCUMENTS, ActionType.VERIFY_DOCUMENT_AUTHENTICITY]:
-            message = "Documents verified via secure enclave. ID confirmed."
-            breakdown.correct_sequencing += 0.05
-            
-        elif a_type == ActionType.ANALYZE_TRANSACTION_PATTERNS:
-            message = "Transaction graph analyzed. Detected 2 circular loops in history."
-            breakdown.accurate_flag_detection += 0.10
-            self._state.investigation_flags_found.append("circular_txns")
-            
-        elif a_type == ActionType.CHECK_WATCHLISTS:
-            message = "Checked OFAC/PEP lists. No direct hits."
-            breakdown.correct_sequencing += 0.05
-            
-        elif a_type == ActionType.INTERVIEW_CUSTOMER:
-            q = getattr(action, "question", None) or getattr(action, "interview_question", None) or ""
-            message = f"Customer replied: 'I received those funds from my uncle regarding the {q}'"
-            self._state.customer.interview_log.append(f"Q: {q} | A: {message}")
-            breakdown.professional_interviewing += 0.10
-            
-        elif a_type == ActionType.PERFORM_RISK_SCORING:
-            if not self._state.investigation_flags_found:
-                breakdown.penalty -= 0.10
-                message = "Risk score performed without gathering evidence. Penalty applied."
-            else:
-                breakdown.correct_sequencing += 0.10
-                message = "Risk safely calculated based on current indicators."
-                
-        elif a_type in [ActionType.APPROVE, ActionType.REJECT, ActionType.ESCALATE, ActionType.FREEZE_ACCOUNT]:
-            done = True
-            # Simplified final reward logic until Phase 3 integrated Graders
-            if a_type == ActionType.APPROVE and self.task_id == "task1_easy":
-                breakdown.correct_final_decision += 0.30
-                message = "Correct Final Decision: Approved clean customer."
-            elif a_type in [ActionType.ESCALATE, ActionType.FREEZE_ACCOUNT] and self.task_id == "task3_hard":
-                breakdown.correct_final_decision += 0.40
-                message = "Correct Final Decision: Synthetic ID halted."
-            else:
-                breakdown.penalty -= 0.50
-                message = "Incorrect Final Decision. Protocol breach."
-            
-            # Efficient investigation logic
-            if self._state.step < self._state.max_steps * 0.7:
-                breakdown.efficient_investigation += 0.10
 
-        # Terminate if max steps exceeded
-        if self._state.step >= self._state.max_steps and not done:
-            done = True
-            message = "Max steps reached without decision."
+        if a_type == ActionType.PULL_DOCUMENT_DOSSIER:
+            context = db_record["docs"]
+            message = f"Dossier retrieved for {cid}."
+            if "docs" not in self._investigation_tracker[cid]:
+                breakdown.data_gathering += 0.05
+                self._investigation_tracker[cid].add("docs")
+
+        elif a_type == ActionType.QUERY_TRANSACTIONS:
+            if not action.start_date or not action.end_date:
+                message = "API Error: QUERY_TRANSACTIONS requires start_date and end_date."
+                breakdown.penalty -= 0.05
+            else:
+                context = f"Ledger for {cid} ({action.start_date} to {action.end_date}): {db_record['txns']}"
+                message = "Transactions retrieved."
+                if "txns" not in self._investigation_tracker[cid]:
+                    breakdown.data_gathering += 0.05
+                    self._investigation_tracker[cid].add("txns")
+
+        elif a_type == ActionType.CHECK_WATCHLISTS:
+            context = f"Watchlist Scan {cid}: {db_record['watchlists']}"
+            message = "Scan complete."
+            if "watchlists" not in self._investigation_tracker[cid]:
+                breakdown.data_gathering += 0.05
+                self._investigation_tracker[cid].add("watchlists")
+
+        elif a_type in [ActionType.APPROVE, ActionType.REJECT, ActionType.FREEZE_ACCOUNT, ActionType.FILE_SAR]:
+            
+            investigated_items = self._investigation_tracker[cid]
+            if not investigated_items:
+                message = f"COMPLIANCE VIOLATION: {a_type.value} issued blindly without reviewing docs or ledgers."
+                breakdown.penalty -= 0.30
+            else:
+                message = f"Decision '{a_type.value}' recorded for {cid}. Awaiting batch grading."
+                breakdown.final_decision += 0.10
+                
+            for c in self._state.customers:
+                if c.customer_id == cid:
+                    c.status = f"processed_{a_type.value}"
+
+        all_processed = all(c.status.startswith("processed") for c in self._state.customers)
+        if all_processed:
+            self._state.done = True
+            message += " | All queue items processed. Run /grade for final score."
+            
+        if self._state.step >= self._state.max_steps and not self._state.done:
+            self._state.done = True
+            message = "Max steps reached. Shift ended with items in queue."
             breakdown.penalty -= 0.20
 
-        # Compute total
         step_total = sum([
-            breakdown.correct_sequencing,
-            breakdown.efficient_investigation,
-            breakdown.accurate_flag_detection,
-            breakdown.professional_interviewing,
-            breakdown.correct_final_decision,
-            breakdown.penalty
+            breakdown.data_gathering, breakdown.accurate_flagging,
+            breakdown.final_decision, breakdown.penalty
         ])
         
         self._state.cumulative_score += step_total
-        self._state.done = done
-        self._state.reward_breakdown = breakdown
-
-        obs = self._build_observation(message)
+        
+        obs = self._build_observation(message, context)
         obs.reward = round(step_total, 4)
-        obs.done = done
-        obs.metadata = {
-            "cumulative_score": round(self._state.cumulative_score, 4),
-            "breakdown": breakdown.model_dump(),
-            "flags": self._state.investigation_flags_found
-        }
         return obs
 
-    def _build_observation(self, message: str) -> Observation:
+    def _build_observation(self, message: str, context: str) -> Observation:
         config = TASK_CONFIG[self.task_id]
-        
-        # Enumerate actions dynamically for UI rendering
         avail = [a.value for a in ActionType]
 
         return Observation(
@@ -145,14 +154,12 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
             episode_id=self._state.episode_id,
             step=self._state.step,
             max_steps=self._state.max_steps,
-            customer=self._state.customer,
+            customer_queue=self._state.customers,
+            investigation_context=context, 
             available_actions=avail,
             completed_actions=self._state.actions_taken,
             task_description=config["description"],
-            message=message,
-            done=self._state.done,
-            reward=0.0,
-            metadata={}
+            message=message
         )
 
     @property
@@ -162,5 +169,8 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
         return self._state
         
     def grade(self) -> float:
-        """Call the deterministic grader"""
-        return grade_episode(self._state)
+        from env.graders.grader1 import grade as run_grade
+        result = run_grade(self._state.actions_taken, self.task_id)
+        if self._state.reward_breakdown:
+            self._state.reward_breakdown.reasoning = result.get("feedback", "")
+        return result["score"]
