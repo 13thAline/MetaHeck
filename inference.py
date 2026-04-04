@@ -39,17 +39,19 @@ You must output ONLY valid JSON. No preambles, no explanations, no markdown form
 CRITICAL INSTRUCTION: You must review your previous actions. DO NOT repeat the exact same discovery action on the same customer twice. 
 Once you gather the data, immediately use a terminal action to make a decision.
 
+IMPORTANT: Use the EXACT customer_id from the queue (e.g. CUST-3AF27F). Do NOT invent IDs.
+
 Your output must EXACTLY match this schema:
 {
     "action_type": "pull_document_dossier", 
-    "target_customer_id": "CUST-001",
+    "target_customer_id": "<INSERT_ID_FROM_QUEUE>",
     "decision_reasoning": "Checking docs.",
     "start_date": "2025-01-01",
-    "end_date": "2025-02-28",
+    "end_date": "2025-03-31",
     "flagged_transaction_ids": [],
     "flagged_document_ids": []
 }
-Valid action_types: pull_document_dossier, query_transactions, check_watchlists, approve, reject, freeze_account, file_sar.
+Valid action_types: pull_document_dossier, query_transactions, check_watchlists, pull_device_signals, interview_customer, approve, reject, escalate, freeze_account, file_sar.
 """
 
 def extract_json_defensively(raw_text: str) -> dict:
@@ -85,10 +87,19 @@ def run_baseline_agent(task_id="task1_easy"):
     log_start(task=task_id, env="BankKYCAuditEnv", model=MODEL_NAME)
     
     for step in range(1, max_steps + 1):
-        # Optimized state to save tokens
+        # Strip queue to just ID + status to prevent context window explosion
+        safe_queue = [
+            {"customer_id": c.get("customer_id"), "status": c.get("status")}
+            for c in obs.get("customer_queue", [])
+            if not c.get("status", "").startswith("processed")
+        ]
+        # Cap investigation context to prevent token overflow
+        raw_context = str(obs.get("investigation_context", ""))
+        safe_context = raw_context[-3000:] if len(raw_context) > 3000 else raw_context
+
         trimmed_obs = {
-            "queue_remaining": [c for c in obs.get("customer_queue", []) if not c.get("status", "").startswith("processed")],
-            "investigation_context": obs.get("investigation_context", ""),
+            "queue_remaining": safe_queue,
+            "investigation_context": safe_context,
             "message": obs.get("message", "")
         }
         messages.append({"role": "user", "content": f"Update:\n{json.dumps(trimmed_obs)}\nWhat is your next action?"})
@@ -101,7 +112,7 @@ def run_baseline_agent(task_id="task1_easy"):
                     model=MODEL_NAME,
                     messages=messages,
                     response_format={"type": "json_object"},
-                    max_tokens=400,
+                    max_tokens=800,
                     temperature=0.1 
                 )
                 break 
@@ -123,6 +134,7 @@ def run_baseline_agent(task_id="task1_easy"):
             action_payload = extract_json_defensively(raw_output)
             action_str = action_payload.get('action_type', 'unknown')
         except Exception as e:
+            debug(f"🚨 JSON PARSE ERROR. Model output was:\n{raw_output}")
             action_payload = {"action_type": "error"}
             action_str = "json_parse_error"
             

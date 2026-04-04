@@ -86,6 +86,8 @@ async def reset(request: Request, task_id: str = "task1_easy", episode_id: Optio
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/step")
 def step(req: StepRequest):
     """Apply an action. Returns observation, reward, done, info."""
     episode_id = req.episode_id or _active_session
