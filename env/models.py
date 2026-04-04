@@ -18,7 +18,13 @@ class ActionType(str, Enum):
 class CustomerProfile(BaseModel):
     customer_id: str
     status: str = "pending_review"
-    personal_info: Dict[str, Any]
+    personal_info: Dict[str, Any] = Field(default_factory=dict)
+    # Extended fields for rich procedural generation
+    documents: List[Dict[str, Any]] = Field(default_factory=list)
+    transaction_history: List[Dict[str, Any]] = Field(default_factory=list)
+    device_signals: Dict[str, Any] = Field(default_factory=dict)
+    behavioral_signals: Dict[str, Any] = Field(default_factory=dict)
+    watchlist_report: str = "Unchecked"
 
 class RewardBreakdown(BaseModel):
     data_gathering: float = 0.0
@@ -62,3 +68,27 @@ class EnvironmentState(BaseState):
     cumulative_score: float = 0.0
     done: bool = False
     reward_breakdown: Optional[RewardBreakdown] = None
+
+
+# ---------------------------------------------------------------------------
+# Episode Manifest — output of the procedural data engine
+# ---------------------------------------------------------------------------
+
+class EpisodeManifest(BaseModel):
+    """Holds everything the environment needs for one episode.
+
+    - customers: the queue the agent sees (blind — no txns/docs exposed yet)
+    - database: keyed by customer_id, contains docs/txns/watchlists/device
+      data that the agent can *discover* via step actions.
+    - ground_truth: keyed by customer_id, contains expected decisions +
+      flagged transaction/document IDs for deterministic grading.
+    - network_truth: (task3 only) adjacency dict for entity-linking scoring.
+    - evidence_keywords: per-customer keyword sets for reasoning quality scoring.
+    """
+    task_id: str
+    seed: int
+    customers: List[CustomerProfile]
+    database: Dict[str, Dict[str, Any]]
+    ground_truth: Dict[str, Dict[str, Any]]
+    network_truth: Dict[str, List[str]] = Field(default_factory=dict)
+    evidence_keywords: Dict[str, List[str]] = Field(default_factory=dict)

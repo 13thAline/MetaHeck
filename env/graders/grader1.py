@@ -1,28 +1,19 @@
 """
-Deterministic Grader - Evaluates exact matches of flagged evidence IDs.
+Deterministic Grader (Task 1) — Evaluates exact matches of flagged evidence IDs.
 Scores 0.0 - 1.0 based on precision/recall (F1 Score) of flagged evidence and final decision.
+
+Ground truth is now passed in dynamically from the procedural data engine,
+not hardcoded at module level.
 """
 from typing import Dict, Any, List
 
-GROUND_TRUTH = {
-    "CUST-001": {
-        "expected_decision": "escalate", # Mismatched utility bill warrants escalation
-        "expected_txns": [],
-        "expected_docs": ["utility_bill"] # Agent must explicitly flag this string/ID
-    },
-    "CUST-002": {
-        "expected_decision": "freeze_account", # VPN + PEP hit + Structured deposits
-        "expected_txns": ["TXN-M1", "TXN-M2"], # Agent MUST extract these exact IDs
-        "expected_docs": ["passport"]
-    }
-}
 
 def calculate_f1(predicted: List[str], actual: List[str]) -> float:
     """Calculates F1 score between two lists of strings."""
     if not predicted and not actual:
-        return 1.0 # Correctly flagged nothing
+        return 1.0  # Correctly flagged nothing
     if not predicted or not actual:
-        return 0.0 # Failed to flag, or hallucinated flags
+        return 0.0  # Failed to flag, or hallucinated flags
         
     pred_set = set(p.lower().strip() for p in predicted)
     actual_set = set(a.lower().strip() for a in actual)
@@ -39,7 +30,18 @@ def calculate_f1(predicted: List[str], actual: List[str]) -> float:
     
     return 2 * (precision * recall) / (precision + recall)
 
-def grade(actions: List[Dict[str, Any]], task_id: str = "task1_easy") -> Dict[str, Any]:
+
+def grade(actions: List[Dict[str, Any]], ground_truth: Dict[str, Any]) -> Dict[str, Any]:
+    """Grade agent actions against dynamically generated ground truth.
+
+    Args:
+        actions: list of action dicts from the agent's session.
+        ground_truth: dict keyed by customer_id with expected_decision,
+                      expected_txns, and expected_docs.
+
+    Returns:
+        dict with 'score' (float 0-1) and 'feedback' (str).
+    """
     if not actions:
         return {"score": 0.0, "feedback": "No actions taken."}
 
@@ -47,17 +49,18 @@ def grade(actions: List[Dict[str, Any]], task_id: str = "task1_easy") -> Dict[st
     feedback_parts = []
     
     # Filter out discovery actions. We only grade terminal decisions.
-    terminal_actions = [a for a in actions if a.get("action_type") in ["approve", "reject", "escalate", "freeze_account", "file_sar"]]
+    terminal_actions = [a for a in actions if a.get("action_type") in
+                        ["approve", "reject", "escalate", "freeze_account", "file_sar"]]
     
     if not terminal_actions:
         return {"score": 0.0, "feedback": "No terminal decisions made. Auto-fail."}
 
     for action in terminal_actions:
         cid = action.get("target_customer_id")
-        if cid not in GROUND_TRUTH:
+        if cid not in ground_truth:
             continue
             
-        gt = GROUND_TRUTH[cid]
+        gt = ground_truth[cid]
         decision = action.get("action_type")
         flagged_txns = action.get("flagged_transaction_ids", [])
         flagged_docs = action.get("flagged_document_ids", [])
@@ -65,15 +68,16 @@ def grade(actions: List[Dict[str, Any]], task_id: str = "task1_easy") -> Dict[st
         cust_score = 0.0
         
         # 1. Base Score for Correct Decision (40%)
-        if decision == gt["expected_decision"]:
+        expected = gt.get("expected_decision", gt.get("decision", ""))
+        if decision == expected:
             cust_score += 0.40
             feedback_parts.append(f"{cid}: Correct decision.")
         else:
-            feedback_parts.append(f"{cid}: Wrong decision (Got {decision}, Expected {gt['expected_decision']}).")
+            feedback_parts.append(f"{cid}: Wrong decision (Got {decision}, Expected {expected}).")
             
         # 2. Evidence Score (F1 of Flagged IDs) (60%)
-        txn_f1 = calculate_f1(flagged_txns, gt["expected_txns"])
-        doc_f1 = calculate_f1(flagged_docs, gt["expected_docs"])
+        txn_f1 = calculate_f1(flagged_txns, gt.get("expected_txns", []))
+        doc_f1 = calculate_f1(flagged_docs, gt.get("expected_docs", []))
         
         # Average the F1 scores
         evidence_score = ((txn_f1 + doc_f1) / 2) * 0.60
@@ -83,7 +87,7 @@ def grade(actions: List[Dict[str, Any]], task_id: str = "task1_easy") -> Dict[st
         total_score += cust_score
 
     # Normalize by number of customers in the Ground Truth
-    final_score = total_score / len(GROUND_TRUTH)
+    final_score = total_score / len(ground_truth) if ground_truth else 0.0
     
     return {
         "score": round(final_score, 4),

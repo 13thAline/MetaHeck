@@ -1,11 +1,15 @@
+import os
 import uuid
+import json
+from datetime import datetime
 from typing import Dict, Any, Optional, List
 
 from openenv.core import Environment
 from env.models import (
     Action, Observation, RewardBreakdown, EnvironmentState,
-    ActionType, CustomerProfile
+    ActionType, CustomerProfile, EpisodeManifest
 )
+from env.data_engine import generate_episode
 
 TASK_CONFIG = {
     "task1_easy": {"max_steps": 15, "description": "Easy: Process the compliance queue. Verify docs, check mismatches."},
@@ -13,26 +17,24 @@ TASK_CONFIG = {
     "task3_hard": {"max_steps": 30, "description": "Hard: Multi-customer mule network. Find the overlapping IP addresses and circular chains."},
 }
 
-MOCK_DATABASE = {
-    "CUST-001": {
-        "docs": "ID: Valid Driver's License. Utility Bill: Mismatch (Address is P.O. Box).",
-        "txns": [{"date": "2025-01-10", "amount": 9500, "type": "deposit", "id": "TXN-A1"}],
-        "watchlists": "CLEAR",
-        "device": "IP: 192.168.1.5 (Local)"
-    },
-    "CUST-002": {
-        "docs": "ID: Passport (Expired).",
-        "txns": [
-            {"date": "2025-02-01", "amount": 9900, "type": "deposit", "id": "TXN-M1"},
-            {"date": "2025-02-02", "amount": 9900, "type": "deposit", "id": "TXN-M2"}
-        ],
-        "watchlists": "PEP HIT (Uncle is Minister of Finance)",
-        "device": "IP: 45.33.22.1 (VPN Detected)"
-    }
+# Task → grader routing
+GRADER_MAP = {
+    "task1_easy": "env.graders.grader1",
+    "task2_medium": "env.graders.grader2",
+    "task3_hard": "env.graders.grader3",
 }
 
+# Optional trajectory logging directory (for future fine-tuning data)
+TRAJECTORY_LOG_DIR = os.getenv("TRAJECTORY_LOG_DIR", "")
+
+
 class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
-    """OpenEnv-compliant 2025 Bank KYC Audit Sandbox."""
+    """OpenEnv-compliant 2025 Bank KYC Audit Sandbox.
+    
+    Now powered by a procedural data engine — every reset() generates
+    fresh, randomized customers and transactions with injected fraud
+    patterns and secretly tracked ground truth.
+    """
 
     SUPPORTS_CONCURRENT_SESSIONS = True
 
@@ -41,19 +43,35 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
             raise ValueError(f"Unknown task_id '{task_id}'.")
         self.task_id = task_id
         self._state: Optional[EnvironmentState] = None
+        self._manifest: Optional[EpisodeManifest] = None
+        self._investigation_tracker: Dict[str, set] = {}
+        self._trajectory: List[Dict[str, Any]] = []
         super().__init__()
 
     def reset(self, seed: Optional[int] = None, episode_id: Optional[str] = None, **kwargs: Any) -> Observation:
         config = TASK_CONFIG[self.task_id]
-        
-        queue = [
-            CustomerProfile(customer_id="CUST-001", status="pending_review", personal_info={"name": "Alice Smith", "opened": "2025-01-01"}),
-            CustomerProfile(customer_id="CUST-002", status="pending_review", personal_info={"name": "Bob Jones", "opened": "2025-02-01"})
-        ]
-        
+        episode_id = episode_id or str(uuid.uuid4())
+
+        # Parse optional seed from env var (for debugging reproducibility)
+        if seed is None:
+            env_seed = os.getenv("EPISODE_SEED", "")
+            if env_seed:
+                try:
+                    seed = int(env_seed)
+                except ValueError:
+                    pass
+
+        # --- Generate fresh episode via the procedural data engine ---
+        self._manifest = generate_episode(
+            task_id=self.task_id, seed=seed, episode_id=episode_id
+        )
+
+        # Build the customer queue from the manifest (agent sees these)
+        queue = self._manifest.customers
+
         self._state = EnvironmentState(
             task_id=self.task_id,
-            episode_id=episode_id or str(uuid.uuid4()),
+            episode_id=episode_id,
             step=0,
             max_steps=config["max_steps"],
             customers=queue,
@@ -62,9 +80,15 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
             done=False,
             reward_breakdown=RewardBreakdown()
         )
-        self._investigation_tracker = {"CUST-001": set(), "CUST-002": set()}
+
+        # Track which data sources each customer has been investigated on
+        self._investigation_tracker = {c.customer_id: set() for c in queue}
+        self._trajectory = []
         
-        return self._build_observation(message="System initialized. Compliance Queue loaded.", context="")
+        return self._build_observation(
+            message="System initialized. Compliance Queue loaded.",
+            context=""
+        )
 
     def step(self, action: Action, timeout_s: Optional[float] = None, **kwargs: Any) -> Observation:
         if self._state is None or self._state.done:
@@ -78,19 +102,25 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
         context = ""
         cid = action.target_customer_id
 
-        if cid not in MOCK_DATABASE:
-            breakdown.penalty -= 0.1
-            return self._build_observation(f"Error: Customer {cid} not found in system.", "")
+        # Query the procedurally generated database
+        db = self._manifest.database
 
-        db_record = MOCK_DATABASE[cid]
+        if cid not in db:
+            breakdown.penalty -= 0.1
+            obs = self._build_observation(f"Error: Customer {cid} not found in system.", "")
+            obs.reward = round(breakdown.penalty, 4)
+            self._log_trajectory(action, obs, breakdown.penalty)
+            return obs
+
+        db_record = db[cid]
         a_type = action.action_type
 
         if a_type == ActionType.PULL_DOCUMENT_DOSSIER:
             context = db_record["docs"]
             message = f"Dossier retrieved for {cid}."
-            if "docs" not in self._investigation_tracker[cid]:
+            if "docs" not in self._investigation_tracker.get(cid, set()):
                 breakdown.data_gathering += 0.05
-                self._investigation_tracker[cid].add("docs")
+                self._investigation_tracker.setdefault(cid, set()).add("docs")
 
         elif a_type == ActionType.QUERY_TRANSACTIONS:
             if not action.start_date or not action.end_date:
@@ -99,20 +129,35 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
             else:
                 context = f"Ledger for {cid} ({action.start_date} to {action.end_date}): {db_record['txns']}"
                 message = "Transactions retrieved."
-                if "txns" not in self._investigation_tracker[cid]:
+                if "txns" not in self._investigation_tracker.get(cid, set()):
                     breakdown.data_gathering += 0.05
-                    self._investigation_tracker[cid].add("txns")
+                    self._investigation_tracker.setdefault(cid, set()).add("txns")
 
         elif a_type == ActionType.CHECK_WATCHLISTS:
             context = f"Watchlist Scan {cid}: {db_record['watchlists']}"
             message = "Scan complete."
-            if "watchlists" not in self._investigation_tracker[cid]:
+            if "watchlists" not in self._investigation_tracker.get(cid, set()):
                 breakdown.data_gathering += 0.05
-                self._investigation_tracker[cid].add("watchlists")
+                self._investigation_tracker.setdefault(cid, set()).add("watchlists")
 
-        elif a_type in [ActionType.APPROVE, ActionType.REJECT, ActionType.FREEZE_ACCOUNT, ActionType.FILE_SAR]:
-            
-            investigated_items = self._investigation_tracker[cid]
+        elif a_type == ActionType.PULL_DEVICE_SIGNALS:
+            context = f"Device Signals for {cid}: {db_record['device']}"
+            message = "Device signals retrieved."
+            if "device" not in self._investigation_tracker.get(cid, set()):
+                breakdown.data_gathering += 0.05
+                self._investigation_tracker.setdefault(cid, set()).add("device")
+
+        elif a_type == ActionType.INTERVIEW_CUSTOMER:
+            question = action.interview_question or "General inquiry"
+            context = f"Interview response from {cid}: 'I have nothing unusual to report regarding: {question}'"
+            message = "Interview recorded."
+            if "interview" not in self._investigation_tracker.get(cid, set()):
+                breakdown.data_gathering += 0.03
+                self._investigation_tracker.setdefault(cid, set()).add("interview")
+
+        elif a_type in [ActionType.APPROVE, ActionType.REJECT, ActionType.FREEZE_ACCOUNT,
+                        ActionType.FILE_SAR, ActionType.ESCALATE]:
+            investigated_items = self._investigation_tracker.get(cid, set())
             if not investigated_items:
                 message = f"COMPLIANCE VIOLATION: {a_type.value} issued blindly without reviewing docs or ledgers."
                 breakdown.penalty -= 0.30
@@ -143,6 +188,9 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
         
         obs = self._build_observation(message, context)
         obs.reward = round(step_total, 4)
+
+        self._log_trajectory(action, obs, step_total)
+
         return obs
 
     def _build_observation(self, message: str, context: str) -> Observation:
@@ -162,6 +210,30 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
             message=message
         )
 
+    def _log_trajectory(self, action: Action, obs: Observation, reward: float) -> None:
+        """Record state-action-reward tuple for trajectory logging (fine-tuning prep)."""
+        self._trajectory.append({
+            "step": self._state.step,
+            "action": action.model_dump(),
+            "reward": reward,
+            "done": self._state.done,
+            "message": obs.message,
+        })
+
+    def _save_trajectory(self) -> None:
+        """Write trajectory to disk if TRAJECTORY_LOG_DIR is configured."""
+        if not TRAJECTORY_LOG_DIR or not self._trajectory:
+            return
+        try:
+            os.makedirs(TRAJECTORY_LOG_DIR, exist_ok=True)
+            filename = f"{self._state.episode_id}_{self.task_id}.jsonl"
+            filepath = os.path.join(TRAJECTORY_LOG_DIR, filename)
+            with open(filepath, "w") as f:
+                for entry in self._trajectory:
+                    f.write(json.dumps(entry) + "\n")
+        except Exception:
+            pass  # Don't crash the environment over logging failures
+
     @property
     def state(self) -> EnvironmentState:
         if self._state is None:
@@ -169,8 +241,36 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
         return self._state
         
     def grade(self) -> float:
-        from env.graders.grader1 import grade as run_grade
-        result = run_grade(self._state.actions_taken, self.task_id)
+        """Run the task-appropriate grader with the dynamically generated ground truth."""
+        import importlib
+
+        grader_module = GRADER_MAP.get(self.task_id, "env.graders.grader1")
+        mod = importlib.import_module(grader_module)
+
+        # All graders now accept (actions, ground_truth)
+        ground_truth = self._manifest.ground_truth
+
+        # For task3, also pass network_truth and evidence_keywords via ground_truth entries
+        if self.task_id == "task3_hard":
+            result = mod.grade(
+                self._state.actions_taken,
+                ground_truth,
+                network_truth=self._manifest.network_truth,
+                evidence_keywords=self._manifest.evidence_keywords,
+            )
+        elif self.task_id == "task2_medium":
+            result = mod.grade(
+                self._state.actions_taken,
+                ground_truth,
+                evidence_keywords=self._manifest.evidence_keywords,
+            )
+        else:
+            result = mod.grade(self._state.actions_taken, ground_truth)
+
         if self._state.reward_breakdown:
             self._state.reward_breakdown.reasoning = result.get("feedback", "")
+
+        # Save trajectory after grading (episode complete)
+        self._save_trajectory()
+
         return result["score"]
