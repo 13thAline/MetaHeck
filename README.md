@@ -1,3 +1,12 @@
+---
+title: BankKYCAuditEnv
+emoji: 🏦
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+short_description: OpenEnv KYC/AML Fraud Detection Environment
+---
 # 🏦 BankKYCAuditEnv — OpenEnv KYC/AML Fraud Detection Environment
 
 > A procedurally generated, multi-task KYC & Anti-Money Laundering compliance environment where AI agents act as **Senior Fraud Analysts** — investigating customer profiles, querying transaction ledgers, scanning watchlists, and making deterministic compliance decisions against dynamically generated ground truth.
