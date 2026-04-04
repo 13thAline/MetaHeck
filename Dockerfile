@@ -7,7 +7,7 @@ RUN pip install uv
 WORKDIR /app
 
 # Expose the standard HF Spaces port
-EXPOSE 8080
+EXPOSE 7860
 
 # Copy dependency files first
 COPY pyproject.toml uv.lock ./
@@ -22,5 +22,5 @@ COPY . .
 ENV PYTHONUNBUFFERED=1
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Run the FastAPI server
-CMD ["uv", "run", "python", "-m", "server.app"]
+# Run the FastAPI server directly
+CMD ["python", "-m", "server.app"]

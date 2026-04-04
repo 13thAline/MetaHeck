@@ -72,7 +72,7 @@ def extract_json_defensively(raw_text: str) -> dict:
     raise ValueError(f"FATAL: Model failed to output JSON. Raw:\n{raw_text}")
 
 def run_baseline_agent(task_id="task1_easy"):
-    env_url = "http://localhost:8080"
+    env_url = "http://localhost:7860"
     
     # Send both via query params and POST body to guarantee we hit whatever routing app.py uses
     reset_res = requests.post(f"{env_url}/reset?task_id={task_id}", json={"task_id": task_id}).json()
