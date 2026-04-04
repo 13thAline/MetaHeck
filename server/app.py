@@ -11,6 +11,7 @@ import uvicorn
 
 from env.environment import BankKYCAuditEnv, TASK_CONFIG
 from env.models import Action
+from fastapi import Request, HTTPException
 
 app = FastAPI(
     title="BankKYCAuditEnv",
@@ -56,26 +57,35 @@ def list_tasks():
 
 
 @app.get("/reset")
-def reset(task_id: str = "task1_easy", episode_id: Optional[str] = None):
+@app.post("/reset")
+async def reset(request: Request, task_id: str = "task1_easy", episode_id: Optional[str] = None):
     """Start a new episode. Returns initial observation."""
     global _active_session
+    
+    # Safely handle the POST request from the hackathon validator
+    if request.method == "POST":
+        try:
+            body = await request.json()
+            # Override query parameters if they are provided in the JSON body
+            task_id = body.get("task_id", task_id)
+            episode_id = body.get("episode_id", episode_id)
+        except Exception:
+            pass # Fallback to defaults if the body is completely empty like '{}'
+
     try:
         env = BankKYCAuditEnv(task_id=task_id)
         obs = env.reset(episode_id=episode_id)
-        episode_id = getattr(obs, "episode_id", "default")
+        current_episode_id = getattr(obs, "episode_id", "default")
         
-        _sessions[episode_id] = env
-        _active_session = episode_id
+        _sessions[current_episode_id] = env
+        _active_session = current_episode_id
         
         return {
-            "episode_id": episode_id,
+            "episode_id": current_episode_id,
             "observation": obs.model_dump() if hasattr(obs, "model_dump") else obs,
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.post("/step")
 def step(req: StepRequest):
     """Apply an action. Returns observation, reward, done, info."""
     episode_id = req.episode_id or _active_session
