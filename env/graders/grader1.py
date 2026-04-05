@@ -1,101 +1,95 @@
 """
-Task 1 Grader — Document completeness and identity verification.
-Scores 0.0 – 1.0 based on correct decisions, risk tier, and evidence quality.
+Deterministic Grader (Task 1) — Evaluates exact matches of flagged evidence IDs.
+Scores 0.0 - 1.0 based on precision/recall (F1 Score) of flagged evidence and final decision.
+
+Ground truth is now passed in dynamically from the procedural data engine,
+not hardcoded at module level.
 """
-from typing import Dict, Any
-from env.models import Action, ActionType, RiskTier
+from typing import Dict, Any, List
 
 
-DECISION_SCORES = {
-    "clear_customer": 0.45,
-    "request_documents": 0.45,
-    "flag_for_review": 0.45,
-    "file_sar": 0.45,
-    "freeze_account": 0.45,
-}
+def calculate_f1(predicted: List[str], actual: List[str]) -> float:
+    """Calculates F1 score between two lists of strings."""
+    if not predicted and not actual:
+        return 1.0  # Correctly flagged nothing
+    if not predicted or not actual:
+        return 0.0  # Failed to flag, or hallucinated flags
+        
+    pred_set = set(p.lower().strip() for p in predicted)
+    actual_set = set(a.lower().strip() for a in actual)
+    
+    true_positives = len(pred_set & actual_set)
+    false_positives = len(pred_set - actual_set)
+    false_negatives = len(actual_set - pred_set)
+    
+    if true_positives == 0:
+        return 0.0
+        
+    precision = true_positives / (true_positives + false_positives)
+    recall = true_positives / (true_positives + false_negatives)
+    
+    return 2 * (precision * recall) / (precision + recall)
 
-# Keywords that indicate good reasoning for each customer
-EVIDENCE_KEYWORDS = {
-    "CUST-T1-A": ["valid", "complete", "documents", "verified", "clear"],
-    "CUST-T1-B": ["expired", "passport", "missing", "utility", "bank statement"],
-    "CUST-T1-C": ["student", "income", "mismatch", "180", "source of funds", "occupation"],
-}
 
+def grade(actions: List[Dict[str, Any]], ground_truth: Dict[str, Any]) -> Dict[str, Any]:
+    """Grade agent actions against dynamically generated ground truth.
 
-def grade(actions: list[Dict[str, Any]], ground_truth: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Grade a set of actions against ground truth for Task 1.
-    Returns score (0.0-1.0) and detailed breakdown.
+    Args:
+        actions: list of action dicts from the agent's session.
+        ground_truth: dict keyed by customer_id with expected_decision,
+                      expected_txns, and expected_docs.
+
+    Returns:
+        dict with 'score' (float 0-1) and 'feedback' (str).
     """
     if not actions:
-        return {"score": 0.0, "breakdown": {}, "feedback": "No actions taken."}
+        return {"score": 0.0, "feedback": "No actions taken."}
 
     total_score = 0.0
-    breakdown = {}
     feedback_parts = []
-    customers_acted_on = set()
+    
+    # Filter out discovery actions. We only grade terminal decisions.
+    terminal_actions = [a for a in actions if a.get("action_type") in
+                        ["approve", "reject", "escalate", "freeze_account", "file_sar"]]
+    
+    if not terminal_actions:
+        return {"score": 0.0, "feedback": "No terminal decisions made. Auto-fail."}
 
-    for action in actions:
-        cid = action.get("customer_id")
-        if cid not in ground_truth or cid in customers_acted_on:
+    for action in terminal_actions:
+        cid = action.get("target_customer_id")
+        if cid not in ground_truth:
             continue
-        customers_acted_on.add(cid)
-
+            
         gt = ground_truth[cid]
-        action_type = action.get("action_type")
-        risk_tier = action.get("risk_tier")
-        reason = (action.get("reason") or "").lower()
-        docs_requested = action.get("documents_requested") or []
-
+        decision = action.get("action_type")
+        flagged_txns = action.get("flagged_transaction_ids", [])
+        flagged_docs = action.get("flagged_document_ids", [])
+        
         cust_score = 0.0
-
-        # 1. Correct decision (45%)
-        if action_type == gt["decision"]:
-            cust_score += 0.45
-            feedback_parts.append(f"{cid}: Correct decision ({action_type}).")
+        
+        # 1. Base Score for Correct Decision (40%)
+        expected = gt.get("expected_decision", gt.get("decision", ""))
+        if decision == expected:
+            cust_score += 0.40
+            feedback_parts.append(f"{cid}: Correct decision.")
         else:
-            feedback_parts.append(
-                f"{cid}: Wrong decision — expected '{gt['decision']}', got '{action_type}'."
-            )
-
-        # 2. Risk tier (20%)
-        if risk_tier and risk_tier == gt["risk_tier"]:
-            cust_score += 0.20
-        elif risk_tier:
-            feedback_parts.append(f"{cid}: Risk tier mismatch — expected '{gt['risk_tier']}'.")
-
-        # 3. Evidence quality in reason (25%) — keyword matching
-        keywords = EVIDENCE_KEYWORDS.get(cid, [])
-        matched = sum(1 for kw in keywords if kw in reason)
-        evidence_score = min(matched / max(len(keywords), 1), 1.0) * 0.25
+            feedback_parts.append(f"{cid}: Wrong decision (Got {decision}, Expected {expected}).")
+            
+        # 2. Evidence Score (F1 of Flagged IDs) (60%)
+        txn_f1 = calculate_f1(flagged_txns, gt.get("expected_txns", []))
+        doc_f1 = calculate_f1(flagged_docs, gt.get("expected_docs", []))
+        
+        # Average the F1 scores
+        evidence_score = ((txn_f1 + doc_f1) / 2) * 0.60
         cust_score += evidence_score
-
-        # 4. Document handling (10%) — for request_documents action
-        if gt["decision"] == "request_documents" and action_type == "request_documents":
-            expected_docs = set(gt.get("missing_docs", []))
-            requested = set(docs_requested)
-            if expected_docs:
-                overlap = len(expected_docs & requested) / len(expected_docs)
-                cust_score += overlap * 0.10
-            else:
-                cust_score += 0.10
-
-        breakdown[cid] = round(cust_score, 3)
+        
+        feedback_parts.append(f"[{cid} Evidence F1 -> Txn:{txn_f1:.2f}, Doc:{doc_f1:.2f}]")
         total_score += cust_score
 
-    # Normalize by number of customers in ground truth
-    num_customers = len(ground_truth)
-    final_score = round(total_score / num_customers, 4) if num_customers else 0.0
-
-    # Penalize if not all customers were reviewed
-    unreviewed = set(ground_truth.keys()) - customers_acted_on
-    if unreviewed:
-        penalty = 0.1 * len(unreviewed)
-        final_score = max(0.0, final_score - penalty)
-        feedback_parts.append(f"Penalty: {len(unreviewed)} customer(s) not reviewed: {unreviewed}")
-
+    # Normalize by number of customers in the Ground Truth
+    final_score = total_score / len(ground_truth) if ground_truth else 0.0
+    
     return {
-        "score": min(final_score, 1.0),
-        "breakdown": breakdown,
-        "feedback": " | ".join(feedback_parts) if feedback_parts else "No valid actions graded.",
+        "score": round(final_score, 4),
+        "feedback": " | ".join(feedback_parts)
     }
