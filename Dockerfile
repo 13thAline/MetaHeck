@@ -20,7 +20,6 @@ COPY . .
 
 # Environment setup
 ENV PYTHONUNBUFFERED=1
-ENV PATH="/app/.venv/bin:$PATH"
 
-# Run the FastAPI server directly
-CMD ["python", "-m", "server.app"]
+# Run the FastAPI server using uv to automatically handle the venv
+CMD ["uv", "run", "python", "-m", "server.app"]
