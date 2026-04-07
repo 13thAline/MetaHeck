@@ -59,24 +59,24 @@ This ensures the environment cannot be memorized or gamed. It is a legitimate, i
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   inference.py                      │
-│            (OpenAI client baseline agent)            │
+│            (OpenAI client baseline agent)           │
 └──────────────────────┬──────────────────────────────┘
                        │ HTTP (POST /reset, /step, GET /grade)
                        ▼
 ┌─────────────────────────────────────────────────────┐
 │                  server/app.py                      │
-│                 (FastAPI on :8080)                   │
+│                 (FastAPI on :7860)                  │
 └──────────────────────┬──────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────┐
 │              env/environment.py                     │
-│           BankKYCAuditEnv (OpenEnv core)             │
+│           BankKYCAuditEnv (OpenEnv core)            │
 │                                                     │
 │  reset() ──► data_engine.generate_episode()         │
 │  step()  ──► queries manifest.database              │
 │  grade() ──► passes manifest.ground_truth           │
-│              to task-specific grader                 │
+│              to task-specific grader                │
 └──────────────────────┬──────────────────────────────┘
                        │
           ┌────────────┼────────────┐
@@ -318,7 +318,7 @@ openenv validate . --verbose
 
 # Start the environment server
 uv run python -m server.app
-# Server runs on http://localhost:8080
+# Server runs on http://localhost:7860
 ```
 
 ### Run the Baseline Agent
@@ -338,10 +338,10 @@ python inference.py
 docker build -t kyc-audit-env .
 
 # Run the container
-docker run -p 8080:8080 --env-file .env kyc-audit-env
+docker run -p 7860:7860 --env-file .env kyc-audit-env
 
 # Test it
-curl -X POST http://localhost:8080/reset \
+curl -X POST http://localhost:7860/reset \
   -H "Content-Type: application/json" \
   -d '{"task_id": "task1_easy"}'
 ```

@@ -6,16 +6,15 @@ import requests
 import time
 from typing import List, Optional
 from openai import OpenAI
+from dotenv import load_dotenv
 
-# 1. HACKATHON REQUIRED ENV VARS
+load_dotenv()
+
 API_BASE_URL = os.getenv("API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
 MODEL_NAME = os.getenv("MODEL_NAME", "gemini-2.5-flash")
-# The rules state they will pass your key via HF_TOKEN
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("GEMINI_API_KEY") 
 
 client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
-
-# 2. STRICT STDOUT LOGGERS (DO NOT MODIFY)
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
@@ -72,11 +71,16 @@ def extract_json_defensively(raw_text: str) -> dict:
     raise ValueError(f"FATAL: Model failed to output JSON. Raw:\n{raw_text}")
 
 def run_baseline_agent(task_id="task1_easy"):
-    env_url = "http://localhost:7860"
+    env_url = os.getenv("ENV_URL", "http://localhost:7860")
     
-    # Send both via query params and POST body to guarantee we hit whatever routing app.py uses
-    reset_res = requests.post(f"{env_url}/reset?task_id={task_id}", json={"task_id": task_id}).json()
-    
+    try:
+        reset_response = requests.post(f"{env_url}/reset?task_id={task_id}", json={"task_id": task_id})
+        reset_response.raise_for_status()
+        reset_res = reset_response.json()
+    except Exception as e:
+        debug(f"FATAL: Could not connect to environment at {env_url}. Error: {e}")
+        return 
+        
     episode_id = reset_res["episode_id"]
     obs = reset_res["observation"]
     max_steps = obs.get("max_steps", 15)
@@ -87,13 +91,11 @@ def run_baseline_agent(task_id="task1_easy"):
     log_start(task=task_id, env="BankKYCAuditEnv", model=MODEL_NAME)
     
     for step in range(1, max_steps + 1):
-        # Strip queue to just ID + status to prevent context window explosion
         safe_queue = [
             {"customer_id": c.get("customer_id"), "status": c.get("status")}
             for c in obs.get("customer_queue", [])
             if not c.get("status", "").startswith("processed")
         ]
-        # Cap investigation context to prevent token overflow
         raw_context = str(obs.get("investigation_context", ""))
         safe_context = raw_context[-3000:] if len(raw_context) > 3000 else raw_context
 
@@ -117,14 +119,11 @@ def run_baseline_agent(task_id="task1_easy"):
                 )
                 break 
             except Exception as e:
-                if "429" in str(e):
-                    debug(f"⚠️ Rate limit hit. Sleeping 40s... (Attempt {attempt+1}/{max_retries})")
-                    time.sleep(40)
-                else:
-                    raise e
+                debug(f"⚠️ API Error: {str(e)}. Sleeping 15s... (Attempt {attempt+1}/{max_retries})")
+                time.sleep(15)
         
         if response is None:
-            log_step(step=step, action="error", reward=0.0, done=True, error="API Quota Exhausted")
+            log_step(step=step, action="error", reward=0.0, done=True, error="LLM API Failure Exhausted")
             break 
             
         raw_output = response.choices[0].message.content
@@ -138,12 +137,16 @@ def run_baseline_agent(task_id="task1_easy"):
             action_payload = {"action_type": "error"}
             action_str = "json_parse_error"
             
-        step_res = requests.post(f"{env_url}/step", json={"episode_id": episode_id, "action": action_payload}).json()
-        
+        try:
+            step_res = requests.post(f"{env_url}/step", json={"episode_id": episode_id, "action": action_payload}).json()
+        except Exception as e:
+            debug(f"🚨 Environment Step Error: {e}")
+            log_step(step=step, action=action_str, reward=0.0, done=True, error="Environment unreachable")
+            break
+            
         error_msg = step_res.get('error')
         obs = step_res.get("observation", {})
         
-        # Reward parsing
         raw_reward = step_res.get("reward", 0.0)
         reward_val = float(raw_reward) if not isinstance(raw_reward, dict) else float(raw_reward.get("step_score", 0.0))
         
@@ -157,7 +160,6 @@ def run_baseline_agent(task_id="task1_easy"):
             
         time.sleep(2) 
 
-    # Final Grading
     final_score = 0.0
     try:
         final_score = requests.get(f"{env_url}/grade?episode_id={episode_id}").json().get("score", 0.0)
