@@ -2,19 +2,22 @@ import os
 import sys
 import json
 import re
-import requests
+import urllib.request
+import urllib.error
 import time
 from typing import List, Optional
 from openai import OpenAI
-from dotenv import load_dotenv
-
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
 MODEL_NAME = os.getenv("MODEL_NAME", "gemini-2.5-flash")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("GEMINI_API_KEY") 
 
-client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
+client = OpenAI(api_key=API_KEY or "dummy_key_to_prevent_crash", base_url=API_BASE_URL)
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
@@ -23,14 +26,27 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
     done_val = str(done).lower()
     print(f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}", flush=True)
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+def log_end(task: str, success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
+    print(f"[END] task={task} success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
 
 def debug(msg: str) -> None:
     """Prints to standard error so it doesn't break the hackathon's stdout regex parser."""
     sys.stderr.write(msg + "\n")
     sys.stderr.flush()
+
+def _http_request(url: str, method: str = "GET", json_data: Optional[dict] = None) -> dict:
+    headers = {"Content-Type": "application/json"} if json_data else {}
+    data = json.dumps(json_data).encode("utf-8") if json_data else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read().decode("utf-8"))
+        except Exception:
+            raise e
 
 SYSTEM_PROMPT = """You are an elite Anti-Money Laundering (AML) investigator AI.
 You must output ONLY valid JSON. No preambles, no explanations, no markdown formatting.
@@ -73,22 +89,28 @@ def extract_json_defensively(raw_text: str) -> dict:
 def run_baseline_agent(task_id="task1_easy"):
     env_url = os.getenv("ENV_URL", "http://localhost:7860")
     
+    log_start(task=task_id, env="BankKYCAuditEnv", model=MODEL_NAME)
+    
     try:
-        reset_response = requests.post(f"{env_url}/reset?task_id={task_id}", json={"task_id": task_id})
-        reset_response.raise_for_status()
-        reset_res = reset_response.json()
+        reset_res = _http_request(f"{env_url}/reset?task_id={task_id}", method="POST", json_data={"task_id": task_id})
     except Exception as e:
         debug(f"FATAL: Could not connect to environment at {env_url}. Error: {e}")
+        log_step(step=1, action="error", reward=0.0, done=True, error="connection_failed")
+        log_end(task=task_id, success=False, steps=0, score=0.0, rewards=[])
         return 
         
-    episode_id = reset_res["episode_id"]
-    obs = reset_res["observation"]
-    max_steps = obs.get("max_steps", 15)
+    try:
+        episode_id = reset_res["episode_id"]
+        obs = reset_res["observation"]
+        max_steps = obs.get("max_steps", 15)
+    except Exception as e:
+        debug(f"FATAL: Missing key in reset response - {e}")
+        log_step(step=1, action="error", reward=0.0, done=True, error="invalid_reset_response")
+        log_end(task=task_id, success=False, steps=0, score=0.0, rewards=[])
+        return
     
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     rewards = []
-    
-    log_start(task=task_id, env="BankKYCAuditEnv", model=MODEL_NAME)
     
     for step in range(1, max_steps + 1):
         safe_queue = [
@@ -138,7 +160,7 @@ def run_baseline_agent(task_id="task1_easy"):
             action_str = "json_parse_error"
             
         try:
-            step_res = requests.post(f"{env_url}/step", json={"episode_id": episode_id, "action": action_payload}).json()
+            step_res = _http_request(f"{env_url}/step", method="POST", json_data={"episode_id": episode_id, "action": action_payload})
         except Exception as e:
             debug(f"🚨 Environment Step Error: {e}")
             log_step(step=step, action=action_str, reward=0.0, done=True, error="Environment unreachable")
@@ -162,11 +184,11 @@ def run_baseline_agent(task_id="task1_easy"):
 
     final_score = 0.0
     try:
-        final_score = requests.get(f"{env_url}/grade?episode_id={episode_id}").json().get("score", 0.0)
+        final_score = _http_request(f"{env_url}/grade?episode_id={episode_id}", method="GET").get("score", 0.0)
     except Exception as e:
         debug(f"Grading Error: {e}")
         
-    log_end(success=(final_score > 0.0), steps=len(rewards), score=final_score, rewards=rewards)
+    log_end(task=task_id, success=(final_score > 0.0), steps=len(rewards), score=final_score, rewards=rewards)
 
 if __name__ == "__main__":
     if not API_KEY:

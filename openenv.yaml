@@ -91,5 +91,5 @@ api:
   health: "GET /health"
 
 runtime:
-  port: 8080
+  port: 7860
   framework: fastapi
