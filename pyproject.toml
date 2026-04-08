@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "bank-kyc-audit-env"
 version = "0.2.0"
@@ -6,32 +10,17 @@ requires-python = ">=3.10"
 dependencies = [
     "openai>=1.0.0",
     "fastapi>=0.115.0",
-    "openenv-core[core]>=0.2.2",
+    "openenv-core>=0.2.0",
     "pydantic>=2.9.0",
     "python-dotenv>=1.0.0",
     "requests>=2.31.0",
     "uvicorn>=0.30.0",
     "httpx>=0.24.0",
-]
-[project.optional-dependencies]
-dev = [
-    "black",
-    "pytest",
+    "pytest>=7.0.0",
 ]
 
 [project.scripts]
 server = "server.app:main"
 
-[build-system]
-requires = ["setuptools>=45", "wheel"]
-build-backend = "setuptools.build_meta"
-
-# Auto-discover packages (best for your current structure with 'env' and 'server' folders)
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["env*", "server*"]
-
-[tool.openenv]
-name = "BankKYCAuditEnv"
-version = "2025.1"
-description = "Realistic multi-turn KYC/AML fraud detection and audit environment for digital banks"
+[tool.setuptools]
+packages = ["env", "server"]
