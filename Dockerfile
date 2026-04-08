@@ -9,17 +9,14 @@ WORKDIR /app
 # Expose the standard HF Spaces port
 EXPOSE 7860
 
-# Copy dependency files first
-COPY pyproject.toml uv.lock ./
-
-# Install dependencies using uv
-RUN uv sync --frozen
-
-# Copy the rest of the application
-COPY . .
+# Copy EVERYTHING into the container first
+COPY . /app/
 
 # Environment setup
 ENV PYTHONUNBUFFERED=1
+
+# Now that the 'env' and 'server' folders are actually inside /app, run the sync
+RUN uv sync --frozen
 
 # Run the FastAPI server using uv to automatically handle the venv
 CMD ["uv", "run", "python", "-m", "server.app"]
