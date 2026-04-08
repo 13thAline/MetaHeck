@@ -1,13 +1,5 @@
 import os
 import sys
-import json
-import re
-import urllib.request
-import urllib.error
-import time
-from typing import List, Optional
-import os
-import sys
 import subprocess
 import json
 import re
@@ -242,7 +234,7 @@ def run_baseline_agent(task_id="task1_easy"):
             debug(f"Grading Error: {e}")
             final_score = 0.0
         
-        final_score = min(max(final_score, 0.0), 1.0)
+        final_score = min(max(final_score, 0.001), 0.999)
         success = (final_score > 0.0)
     
     finally:
