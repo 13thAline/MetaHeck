@@ -6,7 +6,22 @@ import urllib.request
 import urllib.error
 import time
 from typing import List, Optional
-from openai import OpenAI
+import os
+import sys
+import subprocess
+import json
+import re
+import urllib.request
+import urllib.error
+import time
+from typing import List, Optional
+
+try:
+    from openai import OpenAI
+except ImportError:
+    sys.stderr.write("[WARNING] 'openai' missing. Force-installing client dependencies for the external runner...\n")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "openai>=1.50.0", "python-dotenv", "requests"])
+    from openai import OpenAI
 
 
 try:
