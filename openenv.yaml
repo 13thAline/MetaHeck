@@ -1,7 +1,7 @@
 name: bank-kyc-audit-env
 version: "2.0.0"
 description: >
-  BankKYCAuditEnv — an advanced 2025-standard KYC and AML audit environment.
+  BankKYCAuditEnv — an advanced 2026-standard KYC and AML audit environment.
   The agent acts as a Senior KYC Analyst/Fraud Investigator inspecting customer profiles,
   uploaded documents, 90-day transaction histories, device signals, and behavioral
   velocity anomalies. The agent must detect real-world red flags including synthetic

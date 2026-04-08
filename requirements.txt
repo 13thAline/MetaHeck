@@ -1,7 +1,0 @@
-fastapi
-uvicorn[standard]
-pydantic>=2.9.0
-openai
-python-dotenv
-requests
-openenv
