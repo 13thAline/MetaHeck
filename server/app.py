@@ -141,13 +141,31 @@ def grade_episode(episode_id: Optional[str] = None):
     score = env.grade() if hasattr(env, "grade") else 0.0
     return {"episode_id": eid, "score": score}
 
+@app.post("/close")
+async def close_session(request: Request):
+    """Clean up and delete the session from memory."""
+    global _active_session
+    try:
+        body = await request.json()
+        eid = body.get("episode_id") or _active_session
+    except Exception:
+        eid = _active_session
+
+    if eid in _sessions:
+        del _sessions[eid]  
+        if _active_session == eid:
+            _active_session = None
+        return {"status": "closed", "episode_id": eid}
+    
+    return {"status": "not_found", "message": "Session already closed or does not exist."}
+
 
 @app.get("/")
 def root():
     return {
         "name": "BankKYCAuditEnv",
         "openenv": True,
-        "endpoints": ["/reset", "/step", "/state", "/grade", "/tasks", "/health"],
+        "endpoints": ["/reset", "/step", "/state", "/grade", "/tasks", "/health", "/close"],
     }
 
 

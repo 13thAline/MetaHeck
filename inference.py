@@ -7,6 +7,7 @@ import urllib.error
 import time
 from typing import List, Optional
 from openai import OpenAI
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -16,8 +17,10 @@ except ImportError:
 API_BASE_URL = os.getenv("API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
 MODEL_NAME = os.getenv("MODEL_NAME", "gemini-2.5-flash")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("GEMINI_API_KEY") 
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME", "kyc-audit-env")
 
 client = OpenAI(api_key=API_KEY or "dummy_key_to_prevent_crash", base_url=API_BASE_URL)
+
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
@@ -26,12 +29,11 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
     done_val = str(done).lower()
     print(f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}", flush=True)
 
-def log_end(task: str, success: bool, steps: int, score: float, rewards: List[float]) -> None:
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(f"[END] task={task} success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
+    print(f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
 
 def debug(msg: str) -> None:
-    """Prints to standard error so it doesn't break the hackathon's stdout regex parser."""
     sys.stderr.write(msg + "\n")
     sys.stderr.flush()
 
@@ -47,6 +49,29 @@ def _http_request(url: str, method: str = "GET", json_data: Optional[dict] = Non
             return json.loads(e.read().decode("utf-8"))
         except Exception:
             raise e
+
+class RemoteEnv:
+    def __init__(self, env_url: str):
+        self.env_url = env_url
+        self.episode_id = None
+
+    def reset(self, task_id: str):
+        res = _http_request(f"{self.env_url}/reset?task_id={task_id}", method="POST", json_data={"task_id": task_id})
+        self.episode_id = res.get("episode_id")
+        return res
+
+    def step(self, action_payload: dict):
+        return _http_request(f"{self.env_url}/step", method="POST", json_data={"episode_id": self.episode_id, "action": action_payload})
+
+    def grade(self):
+        return _http_request(f"{self.env_url}/grade?episode_id={self.episode_id}", method="GET")
+
+    def close(self):
+        if self.episode_id:
+            try:
+                _http_request(f"{self.env_url}/close", method="POST", json_data={"episode_id": self.episode_id})
+            except Exception as e:
+                debug(f"[DEBUG] env.close() error (container cleanup): {e}")
 
 SYSTEM_PROMPT = """You are an elite Anti-Money Laundering (AML) investigator AI.
 You must output ONLY valid JSON. No preambles, no explanations, no markdown formatting.
@@ -88,107 +113,120 @@ def extract_json_defensively(raw_text: str) -> dict:
 
 def run_baseline_agent(task_id="task1_easy"):
     env_url = os.getenv("ENV_URL", "http://localhost:7860")
+    env = RemoteEnv(env_url)
     
     log_start(task=task_id, env="BankKYCAuditEnv", model=MODEL_NAME)
     
-    try:
-        reset_res = _http_request(f"{env_url}/reset?task_id={task_id}", method="POST", json_data={"task_id": task_id})
-    except Exception as e:
-        debug(f"FATAL: Could not connect to environment at {env_url}. Error: {e}")
-        log_step(step=1, action="error", reward=0.0, done=True, error="connection_failed")
-        log_end(task=task_id, success=False, steps=0, score=0.0, rewards=[])
-        return 
-        
-    try:
-        episode_id = reset_res["episode_id"]
-        obs = reset_res["observation"]
-        max_steps = obs.get("max_steps", 15)
-    except Exception as e:
-        debug(f"FATAL: Missing key in reset response - {e}")
-        log_step(step=1, action="error", reward=0.0, done=True, error="invalid_reset_response")
-        log_end(task=task_id, success=False, steps=0, score=0.0, rewards=[])
-        return
-    
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     rewards = []
-    
-    for step in range(1, max_steps + 1):
-        safe_queue = [
-            {"customer_id": c.get("customer_id"), "status": c.get("status")}
-            for c in obs.get("customer_queue", [])
-            if not c.get("status", "").startswith("processed")
-        ]
-        raw_context = str(obs.get("investigation_context", ""))
-        safe_context = raw_context[-3000:] if len(raw_context) > 3000 else raw_context
-
-        trimmed_obs = {
-            "queue_remaining": safe_queue,
-            "investigation_context": safe_context,
-            "message": obs.get("message", "")
-        }
-        messages.append({"role": "user", "content": f"Update:\n{json.dumps(trimmed_obs)}\nWhat is your next action?"})
-        
-        max_retries = 3
-        response = None
-        for attempt in range(max_retries):
-            try:
-                response = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=messages,
-                    response_format={"type": "json_object"},
-                    max_tokens=800,
-                    temperature=0.1 
-                )
-                break 
-            except Exception as e:
-                debug(f"⚠️ API Error: {str(e)}. Sleeping 15s... (Attempt {attempt+1}/{max_retries})")
-                time.sleep(15)
-        
-        if response is None:
-            log_step(step=step, action="error", reward=0.0, done=True, error="LLM API Failure Exhausted")
-            break 
-            
-        raw_output = response.choices[0].message.content
-        messages.append({"role": "assistant", "content": raw_output})
-        
-        try:
-            action_payload = extract_json_defensively(raw_output)
-            action_str = action_payload.get('action_type', 'unknown')
-        except Exception as e:
-            debug(f"🚨 JSON PARSE ERROR. Model output was:\n{raw_output}")
-            action_payload = {"action_type": "error"}
-            action_str = "json_parse_error"
-            
-        try:
-            step_res = _http_request(f"{env_url}/step", method="POST", json_data={"episode_id": episode_id, "action": action_payload})
-        except Exception as e:
-            debug(f"🚨 Environment Step Error: {e}")
-            log_step(step=step, action=action_str, reward=0.0, done=True, error="Environment unreachable")
-            break
-            
-        error_msg = step_res.get('error')
-        obs = step_res.get("observation", {})
-        
-        raw_reward = step_res.get("reward", 0.0)
-        reward_val = float(raw_reward) if not isinstance(raw_reward, dict) else float(raw_reward.get("step_score", 0.0))
-        
-        done_val = step_res.get("done", False) or obs.get("message", "").find("All queue items processed") != -1
-        
-        rewards.append(reward_val)
-        log_step(step=step, action=action_str, reward=reward_val, done=done_val, error=error_msg)
-        
-        if done_val or error_msg:
-            break
-            
-        time.sleep(2) 
-
+    steps_taken = 0
+    success = False
     final_score = 0.0
+    
     try:
-        final_score = _http_request(f"{env_url}/grade?episode_id={episode_id}", method="GET").get("score", 0.0)
-    except Exception as e:
-        debug(f"Grading Error: {e}")
+        try:
+            reset_res = env.reset(task_id)
+        except Exception as e:
+            debug(f"FATAL: Could not connect to environment at {env_url}. Error: {e}")
+            log_step(step=1, action="error", reward=0.0, done=True, error="connection_failed")
+            return 
+            
+        try:
+            obs = reset_res["observation"]
+            max_steps = obs.get("max_steps", 15)
+        except Exception as e:
+            debug(f"FATAL: Missing key in reset response - {e}")
+            log_step(step=1, action="error", reward=0.0, done=True, error="invalid_reset_response")
+            return
         
-    log_end(task=task_id, success=(final_score > 0.0), steps=len(rewards), score=final_score, rewards=rewards)
+        
+        for step in range(1, max_steps + 1):
+            steps_taken = step
+            safe_queue = [
+                {"customer_id": c.get("customer_id"), "status": c.get("status")}
+                for c in obs.get("customer_queue", [])
+                if not c.get("status", "").startswith("processed")
+            ]
+            raw_context = str(obs.get("investigation_context", ""))
+            safe_context = raw_context[-3000:] if len(raw_context) > 3000 else raw_context
+
+            trimmed_obs = {
+                "queue_remaining": safe_queue,
+                "investigation_context": safe_context,
+                "message": obs.get("message", ""),
+                "completed_actions_so_far": obs.get("completed_actions", []) 
+            }
+            
+            # 2. Rebuild the prompt completely fresh. Do NOT append.
+            step_messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"Update:\n{json.dumps(trimmed_obs)}\nWhat is your next action?"}
+            ]
+            
+            max_retries = 3
+            response = None
+            for attempt in range(max_retries):
+                try:
+                    response = client.chat.completions.create(
+                        model=MODEL_NAME,
+                        messages=step_messages,  # <--- Use the fresh 2-message array
+                        response_format={"type": "json_object"},
+                        max_tokens=1500,         # <--- Increased token ceiling
+                        temperature=0.1 
+                    )
+                    break 
+                except Exception as e:
+                    debug(f"⚠️ API Error: {str(e)}. Sleeping 15s... (Attempt {attempt+1}/{max_retries})")
+                    time.sleep(15)
+            
+            if response is None:
+                log_step(step=step, action="error", reward=0.0, done=True, error="LLM API Failure Exhausted")
+                break 
+                
+            raw_output = response.choices[0].message.content
+            
+            try:
+                action_payload = extract_json_defensively(raw_output)
+                action_str = action_payload.get('action_type', 'unknown')
+            except Exception as e:
+                debug(f"🚨 JSON PARSE ERROR. Model output was:\n{raw_output}")
+                action_payload = {"action_type": "error"}
+                action_str = "json_parse_error"
+                
+            try:
+                step_res = env.step(action_payload)
+            except Exception as e:
+                debug(f"🚨 Environment Step Error: {e}")
+                log_step(step=step, action=action_str, reward=0.0, done=True, error="Environment unreachable")
+                break
+                
+            error_msg = step_res.get('error')
+            obs = step_res.get("observation", {})
+            
+            raw_reward = step_res.get("reward", 0.0)
+            reward_val = float(raw_reward) if not isinstance(raw_reward, dict) else float(raw_reward.get("step_score", 0.0))
+            
+            done_val = step_res.get("done", False) or obs.get("message", "").find("All queue items processed") != -1
+            
+            rewards.append(reward_val)
+            log_step(step=step, action=action_str, reward=reward_val, done=done_val, error=error_msg)
+            
+            if done_val or error_msg:
+                break
+                
+            time.sleep(2) 
+
+        try:
+            final_score = float(env.grade().get("score", 0.0))
+        except Exception as e:
+            debug(f"Grading Error: {e}")
+            final_score = 0.0
+        
+        final_score = min(max(final_score, 0.0), 1.0)
+        success = (final_score > 0.0)
+    
+    finally:
+        env.close()
+        log_end(success=success, steps=steps_taken, score=final_score, rewards=rewards)
 
 if __name__ == "__main__":
     if not API_KEY:
