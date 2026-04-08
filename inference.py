@@ -6,12 +6,8 @@ import urllib.request
 import urllib.error
 import time
 from typing import List, Optional
-try:
-    from openai import OpenAI
-except ImportError:
-    import sys as _sys
-    print("[ERROR] 'openai' package is not installed. Run: pip install -e . (or: pip install 'openai>=1.50.0')", file=_sys.stderr)
-    _sys.exit(1)
+from openai import OpenAI
+
 
 try:
     from dotenv import load_dotenv

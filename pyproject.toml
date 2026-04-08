@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "bank-kyc-audit-env"
 version = "0.2.0"
 description = "Bank KYC & AML Audit Environment (2026 Standards)"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = [
     "openai>=1.0.0",
     "fastapi>=0.115.0",
