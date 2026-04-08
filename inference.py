@@ -6,7 +6,12 @@ import urllib.request
 import urllib.error
 import time
 from typing import List, Optional
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except ImportError:
+    import sys as _sys
+    print("[ERROR] 'openai' package is not installed. Run: pip install -e . (or: pip install 'openai>=1.50.0')", file=_sys.stderr)
+    _sys.exit(1)
 
 try:
     from dotenv import load_dotenv
@@ -95,7 +100,12 @@ Valid action_types: pull_document_dossier, query_transactions, check_watchlists,
 """
 
 def extract_json_defensively(raw_text: str) -> dict:
-    cleaned = re.sub(r'```json|```', '', raw_text).strip()
+    import re
+    # Remove `<think>...</think>` tags to support models that output reasoning
+    text_no_think = re.sub(r'<THINK>.*?</THINK>', '', raw_text, flags=re.IGNORECASE | re.DOTALL)
+    text_no_think = re.sub(r'<THINK>.*', '', text_no_think, flags=re.IGNORECASE | re.DOTALL)
+    
+    cleaned = re.sub(r'```json|```', '', text_no_think).strip()
     try: return json.loads(cleaned)
     except json.JSONDecodeError: pass
     

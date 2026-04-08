@@ -23,6 +23,9 @@ tasks:
       Clean individual customer with minor address mismatch.
       Agent must correctly verify documentation and approve the onboarding.
     max_steps: 10
+    grader:
+      type: python
+      entrypoint: env.graders.grader1:grade
     expected_score_range: [0.75, 1.00]
 
   - id: task2_medium
@@ -31,6 +34,9 @@ tasks:
       Customer with suspicious but explainable transactions, plus incomplete source-of-funds.
       Agent must interview the customer, request additional documentation, and analyze patterns.
     max_steps: 15
+    grader:
+      type: python
+      entrypoint: env.graders.grader2:grade
     expected_score_range: [0.50, 0.85]
 
   - id: task3_hard
@@ -40,6 +46,9 @@ tasks:
       Includes circular transactions, PEP links, and deepfake-style document artifacts.
       Requires extensive multi-step reasoning, watchlists checks, and careful evidence assembly.
     max_steps: 25
+    grader:
+      type: python
+      entrypoint: env.graders.grader3:grade
     expected_score_range: [0.15, 0.40]
 
 observation_space:
