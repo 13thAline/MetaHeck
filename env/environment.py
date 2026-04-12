@@ -1,7 +1,7 @@
 import os
 import uuid
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List
 
 from openenv.core import Environment
@@ -13,8 +13,8 @@ from env.data_engine import generate_episode
 
 TASK_CONFIG = {
     "task1_easy": {"max_steps": 15, "description": "Easy: Process the compliance queue. Verify docs, check mismatches."},
-    "task2_medium": {"max_steps": 20, "description": "Medium: Suspicious txns. Query the ledger, check source of funds."},
-    "task3_hard": {"max_steps": 30, "description": "Hard: Multi-customer mule network. Find the overlapping IP addresses and circular chains."},
+    "task2_medium": {"max_steps": 20, "description": "Medium: Suspicious txns. Query the ledger, check source of funds. Watch for burst velocity."},
+    "task3_hard": {"max_steps": 30, "description": "Hard: Multi-customer mule network. Find overlapping IPs, circular chains, and dormant-burst patterns. Beware ambiguous grey cases."},
 }
 
 # Task → grader routing
@@ -27,13 +27,26 @@ GRADER_MAP = {
 # Optional trajectory logging directory (for future fine-tuning data)
 TRAJECTORY_LOG_DIR = os.getenv("TRAJECTORY_LOG_DIR", "")
 
+# Penalty for each fraudulent transaction that escapes (funds not intercepted)
+FUNDS_ESCAPE_PENALTY = -0.15
+
+# How much time each discovery action advances the global clock
+CLOCK_ADVANCE_HOURS = 1
+
 
 class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
-    """OpenEnv-compliant 2025 Bank KYC Audit Sandbox.
-    
-    Now powered by a procedural data engine — every reset() generates
-    fresh, randomized customers and transactions with injected fraud
-    patterns and secretly tracked ground truth.
+    """OpenEnv-compliant 2026 Bank KYC Audit Sandbox.
+
+    Now powered by a procedural data engine with live time-series dynamics.
+    Every reset() generates fresh, randomized customers and transactions
+    with injected fraud patterns, burst velocity, ambiguous grey cases,
+    and secretly tracked ground truth.
+
+    Key features:
+      - Global simulation clock that advances with discovery actions
+      - Funds escape penalty when fraud transactions are not intercepted
+      - Confidence-weighted grading to resist exploit attempts
+      - Discrete typology codes instead of free-text reasoning
     """
 
     SUPPORTS_CONCURRENT_SESSIONS = True
@@ -46,6 +59,9 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
         self._manifest: Optional[EpisodeManifest] = None
         self._investigation_tracker: Dict[str, set] = {}
         self._trajectory: List[Dict[str, Any]] = []
+        self._current_time: Optional[datetime] = None
+        self._intercepted_txn_ids: set = set()
+        self._escaped_checked: set = set()  # txn IDs already penalised
         super().__init__()
 
     def reset(self, seed: Optional[int] = None, episode_id: Optional[str] = None, **kwargs: Any) -> Observation:
@@ -69,6 +85,12 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
         # Build the customer queue from the manifest (agent sees these)
         queue = self._manifest.customers
 
+        # --- Initialise the global simulation clock ---
+        # Set to the earliest transaction timestamp in the episode
+        self._current_time = self._find_earliest_timestamp()
+        self._intercepted_txn_ids = set()
+        self._escaped_checked = set()
+
         self._state = EnvironmentState(
             task_id=self.task_id,
             episode_id=episode_id,
@@ -78,17 +100,83 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
             actions_taken=[],
             cumulative_score=0.0,
             done=False,
-            reward_breakdown=RewardBreakdown()
+            reward_breakdown=RewardBreakdown(),
+            current_time=self._current_time.isoformat() if self._current_time else "",
+            escaped_funds=0.0,
+            intercepted_txn_ids=[],
         )
 
         # Track which data sources each customer has been investigated on
         self._investigation_tracker = {c.customer_id: set() for c in queue}
         self._trajectory = []
-        
+
         return self._build_observation(
-            message="System initialized. Compliance Queue loaded.",
+            message="System initialized. Compliance Queue loaded. Simulation clock active.",
             context=""
         )
+
+    def _find_earliest_timestamp(self) -> datetime:
+        """Find the earliest transaction timestamp across all customers."""
+        earliest = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        for cid, db_record in self._manifest.database.items():
+            for txn in db_record.get("txns", []):
+                ts_str = txn.get("timestamp", "")
+                if ts_str:
+                    try:
+                        ts = datetime.fromisoformat(ts_str)
+                        if ts < earliest:
+                            earliest = ts
+                    except (ValueError, TypeError):
+                        continue
+        return earliest
+
+    def _advance_clock(self, hours: int = CLOCK_ADVANCE_HOURS) -> None:
+        """Advance the global simulation clock."""
+        if self._current_time:
+            self._current_time += timedelta(hours=hours)
+            self._state.current_time = self._current_time.isoformat()
+
+    def _check_funds_escaped(self) -> float:
+        """Check for fraudulent transactions whose timestamp has passed.
+
+        Returns the total escape penalty for this step.
+        """
+        if not self._current_time:
+            return 0.0
+
+        penalty = 0.0
+        gt = self._manifest.ground_truth
+
+        for cid, entry in gt.items():
+            fraud_txn_ids = set(entry.get("expected_txns", []))
+            if not fraud_txn_ids:
+                continue
+
+            db_record = self._manifest.database.get(cid, {})
+            for txn in db_record.get("txns", []):
+                tid = txn.get("id", "")
+                if tid not in fraud_txn_ids:
+                    continue
+                if tid in self._intercepted_txn_ids:
+                    continue
+                if tid in self._escaped_checked:
+                    continue
+
+                ts_str = txn.get("timestamp", "")
+                if not ts_str:
+                    continue
+
+                try:
+                    txn_time = datetime.fromisoformat(ts_str)
+                except (ValueError, TypeError):
+                    continue
+
+                if txn_time <= self._current_time:
+                    penalty += FUNDS_ESCAPE_PENALTY
+                    self._escaped_checked.add(tid)
+
+        self._state.escaped_funds += abs(penalty)
+        return penalty
 
     def step(self, action: Action, timeout_s: Optional[float] = None, **kwargs: Any) -> Observation:
         if self._state is None or self._state.done:
@@ -96,7 +184,7 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
 
         self._state.step += 1
         self._state.actions_taken.append(action.model_dump())
-        
+
         breakdown = RewardBreakdown()
         message = ""
         context = ""
@@ -121,6 +209,8 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
             if "docs" not in self._investigation_tracker.get(cid, set()):
                 breakdown.data_gathering += 0.05
                 self._investigation_tracker.setdefault(cid, set()).add("docs")
+            # Advance clock for discovery action
+            self._advance_clock()
 
         elif a_type == ActionType.QUERY_TRANSACTIONS:
             if not action.start_date or not action.end_date:
@@ -132,6 +222,8 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
                 if "txns" not in self._investigation_tracker.get(cid, set()):
                     breakdown.data_gathering += 0.05
                     self._investigation_tracker.setdefault(cid, set()).add("txns")
+            # Advance clock for discovery action
+            self._advance_clock()
 
         elif a_type == ActionType.CHECK_WATCHLISTS:
             context = f"Watchlist Scan {cid}: {db_record['watchlists']}"
@@ -139,6 +231,7 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
             if "watchlists" not in self._investigation_tracker.get(cid, set()):
                 breakdown.data_gathering += 0.05
                 self._investigation_tracker.setdefault(cid, set()).add("watchlists")
+            self._advance_clock()
 
         elif a_type == ActionType.PULL_DEVICE_SIGNALS:
             context = f"Device Signals for {cid}: {db_record['device']}"
@@ -146,14 +239,48 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
             if "device" not in self._investigation_tracker.get(cid, set()):
                 breakdown.data_gathering += 0.05
                 self._investigation_tracker.setdefault(cid, set()).add("device")
+            self._advance_clock()
 
         elif a_type == ActionType.INTERVIEW_CUSTOMER:
             question = action.interview_question or "General inquiry"
-            context = f"Interview response from {cid}: 'I have nothing unusual to report regarding: {question}'"
+            # Return hidden interview response if available, else generic
+            interview_data = db_record.get("interview_response",
+                f"I have nothing unusual to report regarding: {question}")
+            context = f"Interview response from {cid}: '{interview_data}'"
             message = "Interview recorded."
             if "interview" not in self._investigation_tracker.get(cid, set()):
                 breakdown.data_gathering += 0.03
                 self._investigation_tracker.setdefault(cid, set()).add("interview")
+            self._advance_clock()
+
+        elif a_type == ActionType.LINK_ENTITIES:
+            source = action.source_customer_id or cid
+            linked = action.linked_customer_id
+            if not linked:
+                message = "API Error: LINK_ENTITIES requires linked_customer_id."
+                breakdown.penalty -= 0.05
+            elif linked not in db:
+                message = f"Error: Linked customer {linked} not found in system."
+                breakdown.penalty -= 0.05
+            else:
+                message = f"Entity link recorded: {source} <-> {linked}."
+                breakdown.data_gathering += 0.03
+
+        elif a_type == ActionType.INTERCEPT_TRANSACTION:
+            txn_ids = action.transaction_ids_to_intercept
+            if not txn_ids:
+                message = "API Error: INTERCEPT_TRANSACTION requires transaction_ids_to_intercept."
+                breakdown.penalty -= 0.05
+            else:
+                newly_intercepted = []
+                for tid in txn_ids:
+                    if tid not in self._intercepted_txn_ids:
+                        self._intercepted_txn_ids.add(tid)
+                        newly_intercepted.append(tid)
+                self._state.intercepted_txn_ids = list(self._intercepted_txn_ids)
+                message = f"Intercepted {len(newly_intercepted)} transaction(s): {newly_intercepted}"
+                if newly_intercepted:
+                    breakdown.accurate_flagging += 0.05
 
         elif a_type in [ActionType.APPROVE, ActionType.REJECT, ActionType.FREEZE_ACCOUNT,
                         ActionType.FILE_SAR, ActionType.ESCALATE]:
@@ -164,16 +291,22 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
             else:
                 message = f"Decision '{a_type.value}' recorded for {cid}. Awaiting batch grading."
                 breakdown.final_decision += 0.10
-                
+
             for c in self._state.customers:
                 if c.customer_id == cid:
                     c.status = f"processed_{a_type.value}"
+
+        # --- Check for funds escaping after clock advancement ---
+        escape_penalty = self._check_funds_escaped()
+        if escape_penalty < 0:
+            breakdown.funds_escaped = escape_penalty
+            message += f" | ⚠️ FUNDS ESCAPED: {abs(escape_penalty):.2f} penalty applied (unintercepted fraud)."
 
         all_processed = all(c.status.startswith("processed") for c in self._state.customers)
         if all_processed:
             self._state.done = True
             message += " | All queue items processed. Run /grade for final score."
-            
+
         if self._state.step >= self._state.max_steps and not self._state.done:
             self._state.done = True
             message = "Max steps reached. Shift ended with items in queue."
@@ -181,11 +314,11 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
 
         step_total = sum([
             breakdown.data_gathering, breakdown.accurate_flagging,
-            breakdown.final_decision, breakdown.penalty
+            breakdown.final_decision, breakdown.penalty, breakdown.funds_escaped
         ])
-        
+
         self._state.cumulative_score += step_total
-        
+
         obs = self._build_observation(message, context)
         obs.reward = round(step_total, 4)
 
@@ -203,7 +336,7 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
             step=self._state.step,
             max_steps=self._state.max_steps,
             customer_queue=self._state.customers,
-            investigation_context=context, 
+            investigation_context=context,
             available_actions=avail,
             completed_actions=self._state.actions_taken,
             task_description=config["description"],
@@ -218,6 +351,7 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
             "reward": reward,
             "done": self._state.done,
             "message": obs.message,
+            "current_time": self._state.current_time,
         })
 
     def _save_trajectory(self) -> None:
@@ -239,7 +373,7 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
         if self._state is None:
             raise RuntimeError("Environment not initialized.")
         return self._state
-        
+
     def grade(self) -> float:
         """Run the task-appropriate grader with the dynamically generated ground truth."""
         import importlib
@@ -247,30 +381,39 @@ class BankKYCAuditEnv(Environment[Action, Observation, EnvironmentState]):
         grader_module = GRADER_MAP.get(self.task_id, "env.graders.grader1")
         mod = importlib.import_module(grader_module)
 
-        # All graders now accept (actions, ground_truth)
+        # All graders now accept (actions, ground_truth, expected_typologies=…)
         ground_truth = self._manifest.ground_truth
+        expected_typologies = self._manifest.expected_typologies
 
-        # For task3, also pass network_truth and evidence_keywords via ground_truth entries
         if self.task_id == "task3_hard":
             result = mod.grade(
                 self._state.actions_taken,
                 ground_truth,
                 network_truth=self._manifest.network_truth,
-                evidence_keywords=self._manifest.evidence_keywords,
+                expected_typologies=expected_typologies,
             )
         elif self.task_id == "task2_medium":
             result = mod.grade(
                 self._state.actions_taken,
                 ground_truth,
-                evidence_keywords=self._manifest.evidence_keywords,
+                expected_typologies=expected_typologies,
             )
         else:
-            result = mod.grade(self._state.actions_taken, ground_truth)
+            result = mod.grade(
+                self._state.actions_taken,
+                ground_truth,
+                expected_typologies=expected_typologies,
+            )
 
         if self._state.reward_breakdown:
             self._state.reward_breakdown.reasoning = result.get("feedback", "")
 
+        # Apply cumulative funds_escaped penalty to the final score
+        final_score = result["score"]
+        if self._state.escaped_funds > 0:
+            final_score = max(0.0, final_score - self._state.escaped_funds * 0.1)
+
         # Save trajectory after grading (episode complete)
         self._save_trajectory()
 
-        return result["score"]
+        return final_score

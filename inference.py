@@ -81,25 +81,24 @@ class RemoteEnv:
             except Exception as e:
                 debug(f"[DEBUG] env.close() error (container cleanup): {e}")
 
-SYSTEM_PROMPT = """You are an elite Anti-Money Laundering (AML) investigator AI.
-You must output ONLY valid JSON. No preambles, no explanations, no markdown formatting.
+SYSTEM_PROMPT = """You are an AML investigator AI. Output exactly ONE action per turn as a single JSON object.
+NEVER output an array. NEVER output multiple actions. No markdown, no explanation.
+DO NOT repeat a discovery action on the same customer. Use EXACT customer_ids from the queue.
 
-CRITICAL INSTRUCTION: You must review your previous actions. DO NOT repeat the exact same discovery action on the same customer twice. 
-Once you gather the data, immediately use a terminal action to make a decision.
+DISCOVERY (only need action_type + target_customer_id):
+{"action_type":"pull_document_dossier","target_customer_id":"CUST-XXXX"}
+{"action_type":"query_transactions","target_customer_id":"CUST-XXXX","start_date":"2024-01-01","end_date":"2025-12-31"}
+{"action_type":"check_watchlists","target_customer_id":"CUST-XXXX"}
+{"action_type":"pull_device_signals","target_customer_id":"CUST-XXXX"}
+{"action_type":"interview_customer","target_customer_id":"CUST-XXXX","interview_question":"Explain source of funds"}
 
-IMPORTANT: Use the EXACT customer_id from the queue (e.g. CUST-3AF27F). Do NOT invent IDs.
+TERMINAL (add regulatory_typology + confidence_score):
+{"action_type":"approve","target_customer_id":"CUST-XXXX","regulatory_typology":["CLEAN_PROFILE"],"confidence_score":0.85}
+{"action_type":"freeze_account","target_customer_id":"CUST-XXXX","regulatory_typology":["STRUCTURING_314A"],"confidence_score":0.9,"flagged_transaction_ids":["TXN-XXXX"]}
 
-Your output must EXACTLY match this schema:
-{
-    "action_type": "pull_document_dossier", 
-    "target_customer_id": "<INSERT_ID_FROM_QUEUE>",
-    "decision_reasoning": "Checking docs.",
-    "start_date": "2025-01-01",
-    "end_date": "2025-03-31",
-    "flagged_transaction_ids": [],
-    "flagged_document_ids": []
-}
-Valid action_types: pull_document_dossier, query_transactions, check_watchlists, pull_device_signals, interview_customer, approve, reject, escalate, freeze_account, file_sar.
+Typology codes: STRUCTURING_314A, LAYERING_FATF_02, SHELL_COMPANY_FATF_04, CIRCULAR_TRANSACTION, SMURFING, RAPID_MOVEMENT, ADDRESS_MISMATCH, PEP_UNDISCLOSED, BURST_VELOCITY, DORMANT_ACTIVATION, CLEAN_PROFILE, DEEPFAKE_DOCUMENT, SANCTIONS_EVASION, BENEFICIAL_OWNER_CONCEALMENT, SYNTHETIC_IDENTITY, TRADE_BASED_ML
+Terminal action_types: approve, reject, escalate, freeze_account, file_sar
+Only include fields relevant to your action. Omit null/empty fields.
 """
 
 def extract_json_defensively(raw_text: str) -> dict:
@@ -109,7 +108,14 @@ def extract_json_defensively(raw_text: str) -> dict:
     text_no_think = re.sub(r'<THINK>.*', '', text_no_think, flags=re.IGNORECASE | re.DOTALL)
     
     cleaned = re.sub(r'```json|```', '', text_no_think).strip()
-    try: return json.loads(cleaned)
+    # Handle arrays: model sometimes outputs [{...}, {...}] — take the first element
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, list):
+            if len(parsed) > 0 and isinstance(parsed[0], dict):
+                return parsed[0]
+            raise json.JSONDecodeError("Empty array", cleaned, 0)
+        return parsed
     except json.JSONDecodeError: pass
     
     try:
@@ -122,6 +128,24 @@ def extract_json_defensively(raw_text: str) -> dict:
                 end = cleaned.rfind('}', 0, end)
                 if end != -1: return json.loads(cleaned[start:end+1])
     except Exception: pass
+
+    # --- Truncated JSON repair (model ran out of tokens) ---
+    if '{' in cleaned and '}' not in cleaned:
+        fragment = cleaned[cleaned.find('{'):]
+        # Strip the last incomplete key-value pair
+        last_comma = fragment.rfind(',')
+        last_colon = fragment.rfind(':')
+        if last_comma > 0 and last_comma > last_colon:
+            fragment = fragment[:last_comma]
+        elif last_colon > 0:
+            # Value was being written — strip from the last complete key
+            last_complete_comma = fragment.rfind(',', 0, last_colon)
+            if last_complete_comma > 0:
+                fragment = fragment[:last_complete_comma]
+        fragment = fragment.rstrip(' ,\n\r\t') + '}'
+        try: return json.loads(fragment)
+        except json.JSONDecodeError: pass
+
     raise ValueError(f"FATAL: Model failed to output JSON. Raw:\n{raw_text}")
 
 def run_baseline_agent(task_id="task1_easy"):
